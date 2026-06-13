@@ -970,8 +970,13 @@ func (s *StreamAllocator) allocateTrack(track *Track) {
 		bestLayer := buffer.InvalidLayer
 
 	alloc_loop:
-		for spatial := int32(0); spatial <= buffer.DefaultMaxLayerSpatial; spatial++ {
-			for temporal := int32(0); temporal <= buffer.DefaultMaxLayerTemporal; temporal++ {
+		// SPEAKNOW FORK (2026-06-13): temporal-DIŞ (allocateAllTracks ① ile aynı; tek-track yolu da
+		// spatial-dış'tı → aynı 12fps tuzağı). bestLayer son sığan candidate → (S_fit, maxT).
+		// ESKİ:
+		// for spatial := int32(0); spatial <= buffer.DefaultMaxLayerSpatial; spatial++ {
+		// 	for temporal := int32(0); temporal <= buffer.DefaultMaxLayerTemporal; temporal++ {
+		for temporal := int32(0); temporal <= buffer.DefaultMaxLayerTemporal; temporal++ {
+			for spatial := int32(0); spatial <= buffer.DefaultMaxLayerSpatial; spatial++ {
 				layer := buffer.VideoLayer{
 					Spatial:  spatial,
 					Temporal: temporal,
@@ -1179,8 +1184,15 @@ func (s *StreamAllocator) allocateAllTracks() {
 			track.ProvisionalAllocatePrepare()
 		}
 
-		for spatial := int32(0); spatial <= buffer.DefaultMaxLayerSpatial; spatial++ {
-			for temporal := int32(0); temporal <= buffer.DefaultMaxLayerTemporal; temporal++ {
+		// SPEAKNOW FORK (2026-06-13): temporal-DIŞ döngü (eski: spatial-dış). ProvisionalAllocate
+		// her sığan katmanı allocatedLayer=layer ile üzerine yazdığından (forwarder.go:1016),
+		// temporal-dış walk bant-kısıtlı izleyiciyi (S_fit, maxT)'ye oturtur → çözünürlük iner,
+		// fps SABİT (24). Eski spatial-dış: (S2,T0)=1080@12fps tuzağı. İyi bağlantı yine S2T3 alır.
+		// ESKİ:
+		// for spatial := int32(0); spatial <= buffer.DefaultMaxLayerSpatial; spatial++ {
+		// 	for temporal := int32(0); temporal <= buffer.DefaultMaxLayerTemporal; temporal++ {
+		for temporal := int32(0); temporal <= buffer.DefaultMaxLayerTemporal; temporal++ {
+			for spatial := int32(0); spatial <= buffer.DefaultMaxLayerSpatial; spatial++ {
 				layer := buffer.VideoLayer{
 					Spatial:  spatial,
 					Temporal: temporal,
