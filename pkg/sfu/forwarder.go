@@ -373,7 +373,12 @@ func (f *Forwarder) DetermineCodec(codec webrtc.RTPCodecCapability, extensions [
 			if f.vls != nil {
 				f.vls = videolayerselector.NewSimulcastFromOther(f.vls)
 			} else {
-				f.vls = videolayerselector.NewDependencyDescriptor(f.logger)
+				// SPEAKNOW FORK: DD selector VP9 SIMULCAST'i (ayri stream'ler) yanlis yonetip
+				// neredeyse her frame'de "switch" raporluyordu (6125 switch/90s -> her switch'te
+				// extNextTS=extLastTS+1 -> frozen timestamp -> donma). Simulcast selector ayri-stream
+				// modelini dogru kullanir (keyframe'de switch). skipReferenceTS (yukarida) ilk
+				// denemedeki timestamp storm'unu cozdugu icin Simulcast selector artik calisir.
+				f.vls = videolayerselector.NewSimulcast(f.logger)
 			}
 		} else {
 			f.isDDAvailable = ddAvailable(extensions)
