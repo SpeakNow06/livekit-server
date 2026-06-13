@@ -362,6 +362,14 @@ func (f *Forwarder) DetermineCodec(codec webrtc.RTPCodecCapability, extensions [
 	case mime.MimeTypeVP9:
 		f.codecMunger = codecmunger.NewNull(f.logger)
 		if sfuutils.IsSimulcastMode(videoLayerMode) {
+			// SPEAKNOW FORK: VP9 simulcast'in per-katman RTCP Sender Report'lari guvenilmez ->
+			// SR-tabanli cross-layer timestamp offset (getRefLayerRTPTimestamp) yanlis cikip
+			// layer switch'i "switch point too far behind" ile reddediyor -> NACK firtinasi/cokus
+			// (canli log: tsOffset hep 0, 2322 basarisiz switch, %83 kayip). LiveKit'in
+			// ONE_SPATIAL_LAYER_PER_STREAM_INCOMPLETE_RTCP_SR icin tasarladigi kacis kapisi:
+			// skipReferenceTS=true -> SR-offset atlanir, gec-sure tabanli (extExpectedTS) timestamp
+			// kullanilir -> switch SR olmadan calisir. VP9 simulcast'te SR'lar zaten yetersiz.
+			f.skipReferenceTS = true
 			if f.vls != nil {
 				f.vls = videolayerselector.NewSimulcastFromOther(f.vls)
 			} else {
