@@ -1248,12 +1248,10 @@ func (f *Forwarder) ProvisionalAllocateGetBestWeightedTransition() (VideoTransit
 			transitionCost := int32(0)
 			// SVC-TODO: SVC will need a different cost transition
 			if targetLayer.Spatial != s {
-				transitionCost = 1 // SPEAKNOW FORK: spatial-drop ucuzlat (eski: TransitionCostSpatial=10) → tıkanıklıkta spatial düş, fps koru
+				transitionCost = TransitionCostSpatial
 			}
 
-			// SPEAKNOW FORK (2026-06-13): maliyet TERS — temporal düşüşü pahalı (fps koru), spatial ucuz.
-			// ESKİ: qualityCost := (maxReachableLayerTemporal+1)*(targetLayer.Spatial-s) + (targetLayer.Temporal - t)
-			qualityCost := (targetLayer.Temporal-t)*(buffer.DefaultMaxLayerSpatial+1) + (targetLayer.Spatial - s)
+			qualityCost := (maxReachableLayerTemporal+1)*(targetLayer.Spatial-s) + (targetLayer.Temporal - t)
 
 			value := float32(0)
 			if (transitionCost + qualityCost) != 0 {
@@ -1441,13 +1439,9 @@ func (f *Forwarder) AllocateNextHigher(availableChannelCapacity int64, available
 	}
 
 	// try moving spatial layer up if temporal layer move up is not available
-	// SPEAKNOW FORK (2026-06-13): spatial-up'ı maxTemporal'da yap (eski: 0'dan başlıyordu).
-	// Aksi halde bant sınırda izleyici (S+1, T0)=yüksek-çözünürlük@12fps'e çıkardı (upgrade'de
-	// 12fps tuzağı). Artık spatial sadece TAM-FPS (maxT) sığarsa yükselir; yoksa (S, maxT)'de kalır.
 	done, allocation, boosted = doAllocation(
 		targetLayer.Spatial+1, maxLayer.Spatial,
-		// ESKİ: 0, maxLayer.Temporal,
-		maxLayer.Temporal, maxLayer.Temporal,
+		0, maxLayer.Temporal,
 	)
 	if done {
 		return allocation, boosted
