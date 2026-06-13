@@ -365,15 +365,7 @@ func (f *Forwarder) DetermineCodec(codec webrtc.RTPCodecCapability, extensions [
 			if f.vls != nil {
 				f.vls = videolayerselector.NewSimulcastFromOther(f.vls)
 			} else {
-				// ESKİ: f.vls = videolayerselector.NewDependencyDescriptor(f.logger)
-				// SPEAKNOW FIX (2026-06-13): VP9 simulcast artık DependencyDescriptor yerine
-				// basit Simulcast selector (VP8/H.264 ile aynı yol) kullanıyor. DD selector,
-				// contentHint='text' (screen-content) modunda kullanılamaz hale geliyor ve
-				// simulcast dalının fallback'i olmadığı için TÜM kareler düşüyordu → öğrenci
-				// daha ilk karede donuyordu. Simulcast selector yalnız rid(spatial)+IsVP9KeyFrame
-				// kullanır, DD'ye hiç bakmaz → text-güvenli + per-viewer çözünürlük adaptasyonu
-				// (fps sabit; rid'ler arası geçiş keyframe'de, PLI ile tetiklenir).
-				f.vls = videolayerselector.NewSimulcast(f.logger)
+				f.vls = videolayerselector.NewDependencyDescriptor(f.logger)
 			}
 		} else {
 			f.isDDAvailable = ddAvailable(extensions)
