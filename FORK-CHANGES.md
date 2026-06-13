@@ -4,7 +4,7 @@
 Amaç: **VP9 simulcast** desteği (upstream'de bilerek KAPALI — LiveKit VP9'u SVC sayar,
 `simulcast` alanını yok sayar) + ipv6 TURN fix.
 
-- **Branch:** `speaknow-spatialfirst`
+- **Branch:** `speaknow-vp9-simulcast`
 - **Base:** v1.11.0 (`8ccad68`, Release v1.11.0 #4459)
 - **Image:** `ghcr.io/speaknow06/livekit-server:v1.11.0-vp9simulcast-fix3` — PROD'DA CANLI, ÇALIŞIYOR (2026-06-13 doğrulandı)
 
@@ -48,14 +48,22 @@ tek uptrack); simulcast rid≥1'de rid index (`layer`) authoritative.
 
 ## Rebuild
 ```bash
-cd livekit-server-source            # bu repo, branch speaknow-spatialfirst
+cd livekit-server-source            # bu repo, branch speaknow-vp9-simulcast
 docker build --platform linux/amd64 -t ghcr.io/speaknow06/livekit-server:TAG .
 echo "$GHCR_PAT" | docker login ghcr.io -u SpeakNow06 --password-stdin   # PAT: Speaknow-Prod.md
 docker push ghcr.io/speaknow06/livekit-server:TAG
 ```
 Deploy (prod): `~/Livekit-server/docker-compose.yml` image tag güncelle → `docker compose pull livekit && docker compose up -d livekit`.
 
-## Client tarafı (speaknow-server repo, branch server)
+## Client SDK fork (livekit-client — VP9 simulcast'i AÇMAK için ŞART)
+Upstream `livekit-client` VP9'u her koşulda SVC'ye zorlar; VP9 simulcast'i client'tan açmak için
+AYRI fork ŞART: **`~/Desktop/web/livekit-client-fork`** (livekit-client 2.19.0, branch `svc-patch`).
+Ana sinyal: **`SimulcastCodec.videoLayerMode = ONE_SPATIAL_LAYER_PER_STREAM`** (yoksa server SVC
+varsayar) + per-encoding `scalabilityMode` (Chrome M113+ şartı) + simulcast'te SVC default'larını
+atlama. Bundle: `livekit-client-2.19.0-svc.umd.js` (speaknow-server vendor'da). **Server fork (bu
+repo) + client SDK fork BİRLİKTE gerekir.**
+
+## Client config (speaknow-server repo, branch server)
 Classroom ekran: `static/js/classroom-media-config.js` → `videoCodec:'vp9', simulcast:true,
 scalabilityMode:'L1T2'`, ladder 1080/720/540. `contentHint` text VE motion ikisi de çalışır (bu
 fork'larla). Webinar ayrı: H.264 simulcast + text (dokunulmadı).

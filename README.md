@@ -1,3 +1,94 @@
+# livekit-server — VP9 Simulcast Fork (SpeakNow)
+
+A minimal fork of [`livekit/livekit`](https://github.com/livekit/livekit) **v1.11.0** that makes
+**VP9 simulcast** work end-to-end. LiveKit treats VP9 as an SVC-only codec — the `simulcast` field
+is ignored for VP9, and VP9 simulcast (`ONE_SPATIAL_LAYER_PER_STREAM`, a separate RTP stream per
+spatial resolution) is unimplemented. This fork adds the four missing SFU pieces.
+
+✅ **Status:** running in production since 2026-06-13. Single and multiple subscribers, per-viewer
+resolution adaptation (a weak viewer drops to a lower-res rid while others stay higher), clean
+up/down layer switches, `contentHint` `text` **and** `motion` both fine.
+
+| | |
+|---|---|
+| Branch | `speaknow-vp9-simulcast` |
+| Base | v1.11.0 (`8ccad68`) |
+| Image | `ghcr.io/speaknow06/livekit-server:v1.11.0-vp9simulcast-fix3` |
+| Net diff | 5 files, ~35 lines |
+| Turkish notes | [FORK-CHANGES.md](FORK-CHANGES.md) |
+
+## Why VP9 simulcast (vs SVC)?
+Per-viewer **resolution** adaptation at **constant fps** (weak viewer → lower-res rid; fps stays),
+plus Android **hardware decode** of single-spatial rids. VP9 **SVC** doesn't give this
+(screen-content/`text` collapses spatial to one; Android falls back to software decode); VP9
+**simulcast** does, but it's unsupported upstream.
+
+## The bug
+A VP9-simulcast subscriber works ~60 s (stable on its initial layer), then **freezes the instant
+the allocator first switches layers**: the forwarder enters a constant `processSourceSwitch` loop
+(~60/s), output timestamps freeze (`extNextTS = extLastTS + 1`), NACK/PLI storm follows. H.264/VP8
+simulcast is unaffected.
+
+## Root causes & fixes
+
+### 1. `pkg/sfu/receiver_base.go` — all rids collapse to spatial layer 0  *(the main one)*
+```go
+spatialLayer := layer
+if extPkt.Spatial >= 0 {            // SVC: take spatial from the packet
+    spatialLayer = extPkt.Spatial
+}
+```
+Each VP9 simulcast rid is single-spatial, so its Dependency-Descriptor `SpatialId == 0`. The
+override maps **every** rid to `spatialLayer 0`; the forwarder can no longer tell rids apart and
+alternates between their SSRCs on every packet. (H.264/VP8 are unaffected: `extPkt.Spatial == -1`,
+so the override never fires — which is why they work and VP9 doesn't.)
+**Fix:** apply the override only for SVC (single uptrack → `layer == 0`).
+
+### 2. `pkg/sfu/forwarder.go` — cross-layer timestamp offset never establishes
+`getRefLayerRTPTimestamp` derives the inter-layer RTP-timestamp offset from RTCP Sender Reports;
+for VP9 simulcast it never becomes valid (`tsOffset` stays 0), so every switch fails with
+`switch point too far behind`. **Fix:** treat VP9 simulcast like
+`ONE_SPATIAL_LAYER_PER_STREAM_INCOMPLETE_RTCP_SR` (set `skipReferenceTS`) and fall back to the
+elapsed-time `extExpectedTS`.
+
+### 3. `pkg/sfu/forwarder.go` — wrong selector
+VP9 simulcast was routed to the `DependencyDescriptor` selector (built for one-stream SVC), which
+reports a switch on nearly every frame. **Fix:** use the `Simulcast` selector (keyframe-based,
+built for separate-stream simulcast — same path as VP8/H.264).
+
+### 4. `pkg/sfu/buffer/dependencydescriptorparser.go` — frame drops with frequent keyframes
+`structureExtFrameNum` advances on **every** structure-bearing keyframe, even when `StructureId` is
+unchanged, so reordered/retransmitted frames are dropped as "earlier than current structure"
+(severe with screen-content / `contentHint=text`). **Fix:** advance the drop threshold (new
+`structureChangeExtFrameNum`) only on an actual `StructureId` change; leave `ExtKeyFrameNum` alone.
+
+### Plus (not VP9-specific)
+- `pkg/service/roommanager.go` — ipv6 TURN-URL fix: stock v1.11.0 emits IPv6 into the TURN URL
+  without brackets → client `setConfiguration` error. Use `NodeIP.V4` only.
+- `Dockerfile` — `--platform=$BUILDPLATFORM` for fast native cross-compile.
+
+## Client SDK also needs a fork
+VP9 simulcast must be **enabled on the client** too — upstream `livekit-client` forces VP9 into
+SVC. A separate `livekit-client` fork (2.19.0, branch `svc-patch`) signals
+**`SimulcastCodec.videoLayerMode = ONE_SPATIAL_LAYER_PER_STREAM`** (without which the server assumes
+SVC), sets per-encoding `scalabilityMode` (required on Chrome M113+), and skips the SVC defaults in
+simulcast mode. App publish config: `videoCodec:'vp9', simulcast:true, scalabilityMode:'L1T2'`.
+The server fork (this repo) **and** the client SDK fork are both required.
+
+## Build
+```bash
+docker build --platform linux/amd64 -t ghcr.io/speaknow06/livekit-server:TAG .
+docker push ghcr.io/speaknow06/livekit-server:TAG
+```
+
+Every LiveKit upgrade requires re-applying these 5 changes onto the new base. A `spatial-drop-first`
+allocator experiment was tried and **reverted** (stock allocator + the `Simulcast` selector are
+sufficient). Reported upstream to LiveKit; PR offered.
+
+---
+
+_Below is the upstream LiveKit README._
+
 <!--BEGIN_BANNER_IMAGE-->
 
 <picture>
