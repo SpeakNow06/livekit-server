@@ -1024,9 +1024,10 @@ func (r *RoomManager) iceServersForParticipant(apiKey string, participant types.
 		if r.config.TURN.UDPPort > 0 && !tlsOnly {
 			// UDP TURN is used as STUN
 			hasSTUN = true
-			for _, ip := range r.config.RTC.NodeIP.ToStringSlice() {
-				urls = append(urls, fmt.Sprintf("turn:%s:%d?transport=udp", ip, r.config.TURN.UDPPort))
-			}
+			// SPEAKNOW FORK (ipv6fix): YALNIZ V4. ToStringSlice() V6'yı da döndürür; V6 köşeli-
+			// ayraçsız "turn:2a03:...:3478" = bozuk URL → client RTCPeerConnection.setConfiguration
+			// syntax error (livekit#4404; turn.go RelayAddress da NodeIP.V4 kullanır). ESKİ: ToStringSlice loop.
+			urls = append(urls, fmt.Sprintf("turn:%s:%d?transport=udp", r.config.RTC.NodeIP.V4, r.config.TURN.UDPPort))
 		}
 		if r.config.TURN.TLSPort > 0 {
 			urls = append(urls, fmt.Sprintf("turns:%s:443?transport=tcp", r.config.TURN.Domain))
