@@ -62,6 +62,11 @@ type DependencyDescriptorParser struct {
 	seqWrapAround             *utils.WrapAround[uint16, uint64]
 	frameWrapAround           *utils.WrapAround[uint16, uint64]
 	structureExtFrameNum      uint64
+	// SPEAKNOW FORK: drop esigi — yalniz yapi (StructureId) GERCEKTEN degisince ilerler.
+	// structureExtFrameNum HER keyframe'de ilerliyordu; ayni yapinin tekrar gonderildigi
+	// sik-keyframe (text/screen-content) akista, gec gelen GECERLI kareler "earlier than
+	// structure" diye atilip donma yapiyordu. ExtKeyFrameNum hala structureExtFrameNum'u kullanir.
+	structureChangeExtFrameNum uint64
 	activeDecodeTargetsExtSeq uint64
 	activeDecodeTargetsMask   uint32
 	frameChecker              *FrameIntegrityChecker
@@ -152,7 +157,7 @@ func (r *DependencyDescriptorParser) Parse(pkt *rtp.Packet) (*ExtDependencyDescr
 	unwrapped := r.frameWrapAround.UpdateWithOrderKnown(ddVal.FrameNumber, restart)
 	extFN := unwrapped.ExtendedVal
 
-	if extFN < r.structureExtFrameNum {
+	if extFN < r.structureChangeExtFrameNum { // SPEAKNOW FORK: structureExtFrameNum -> structureChangeExtFrameNum (yalniz gercek yapi-degisiminde ilerler)
 		r.logger.Debugw(
 			"drop frame which is earlier than current structure",
 			"fn", ddVal.FrameNumber,
@@ -188,6 +193,9 @@ func (r *DependencyDescriptorParser) Parse(pkt *rtp.Packet) (*ExtDependencyDescr
 		}
 
 		if r.structure == nil || ddVal.AttachedStructure.StructureId != r.structure.StructureId {
+			// SPEAKNOW FORK: drop esigini YALNIZ burada (gercek yapi degisimi / ilk yapi) ilerlet.
+			// Ayni StructureId tekrar gelirse ilerletme -> gec gelen gecerli kareler atilmaz.
+			r.structureChangeExtFrameNum = extFN
 			r.logger.Debugw(
 				"structure updated",
 				"structureID", ddVal.AttachedStructure.StructureId,
@@ -251,6 +259,7 @@ func (r *DependencyDescriptorParser) restart() {
 	r.frameChecker = NewFrameIntegrityChecker(integrityCheckFrame, integrityCheckPkt)
 	r.structure = nil
 	r.structureExtFrameNum = 0
+	r.structureChangeExtFrameNum = 0
 	r.activeDecodeTargetsExtSeq = 0
 	r.activeDecodeTargetsMask = 0
 	r.decodeTargets = r.decodeTargets[:0]
