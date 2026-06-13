@@ -83,7 +83,7 @@ docker push ghcr.io/speaknow06/livekit-server:TAG
 
 Every LiveKit upgrade requires re-applying these 5 changes onto the new base. A `spatial-drop-first`
 allocator experiment was tried and **reverted** (stock allocator + the `Simulcast` selector are
-sufficient). Reported upstream to LiveKit; PR offered.
+sufficient). Reported upstream: [livekit/livekit#4594](https://github.com/livekit/livekit/issues/4594) (PR offered).
 
 ---
 
