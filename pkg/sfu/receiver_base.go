@@ -1012,7 +1012,12 @@ func (r *ReceiverBase) forwardRTP(
 		}
 
 		spatialLayer := layer
-		if extPkt.Spatial >= 0 {
+		// SPEAKNOW FORK: extPkt.Spatial (DD/VP9 SID) sadece SVC'de authoritative (tek uptrack,
+		// layer hep 0, spatial paketten gelir). SIMULCAST'te her rid tek-spatial -> VP9'da DD SID
+		// HEP 0; onunla ezilirse TUM rid'ler "spatial 0"a coker -> forwarder rid'leri ayirt edemez,
+		// alternatif yapar -> frozen. (H.264/VP8'de Spatial=-1 oldugu icin bu override hic firmiyordu.)
+		// Simulcast'te rid index (layer) gecerli. layer==0 SVC'yi yakalar; rid>=1'de override etme.
+		if extPkt.Spatial >= 0 && layer == 0 {
 			// svc packet, take spatial layer info from packet
 			spatialLayer = extPkt.Spatial
 		}
