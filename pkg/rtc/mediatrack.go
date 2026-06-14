@@ -147,6 +147,11 @@ func NewMediaTrack(params MediaTrackParams, ti *livekit.TrackInfo) *MediaTrack {
 			DynacastPauseDelay: params.VideoConfig.DynacastPauseDelay,
 			Listener:           t,
 			Logger:             params.Logger,
+			// SpeakNow fork #6: exact-match yalniz cok-katmanli (>1 layer) track'te (ekran simulcast).
+			// Tek-katmanli (kamera) -> stock kalir (exact-match tek encoding'i kapatip kamerayi oldurur).
+			IsMultiLayer: func(m mime.MimeType) bool {
+				return len(buffer.GetVideoLayersForMimeType(m, t.MediaTrackReceiver.TrackInfo())) > 1
+			},
 		})
 
 	case livekit.TrackType_AUDIO:

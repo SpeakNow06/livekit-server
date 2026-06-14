@@ -72,6 +72,18 @@ Boş/stabil odada tetiklenmez; dolu odada alt katmanlar zaten açık. VP9 simulc
 > Not: Bu değişiklik VP9 simulcast'ten bağımsızdır; H.264 webinar simulcast'i de etkiler (orada da
 > izlenmeyen katman durur — webinar'ın zaten beklediği davranış, bkz `webinar-livekit.js` dynacast notu).
 
+**DÜZELTME v2 (2026-06-14 — KAMERA REGRESYONU, ŞART):** İlk `dynacast1` image'i **tek-katmanlı
+kamerayı bozdu.** Kamera tek encoding'i SDP'de rid `q`(=LOW) slotundayken, server abonenin quality'sini
+**HIGH** hesaplıyor (`GetVideoQualityForSpatialLayer` lone spatial-0 layer → HIGH). Stock "max'in
+altındaki HER katmanı aç" bu tutarsızlığı örtüyordu (LOW da açık → kamera yayılır). Exact-match yalnız
+HIGH'ı açıp `q`/LOW encoding'i kapatınca → **kamera hiç gitmedi** (`active=false`, öğretmende sürekli
+"internet kötü"/POOR göstergesi). **Fix:** exact-match YALNIZ **çok-katmanlı** track'te uygulanır —
+`DynacastManagerVideoParams.IsMultiLayer` (mediatrack.go'da `len(buffer.GetVideoLayersForMimeType) > 1`
+ile geçilir); tek-katman (kamera) ya da kume-bos → **stock** (`q<=max`, tek encoding asla kapanmaz).
+Ekran paylaşımı (q/h/f = 3 katman) optimizasyonu aynen korunur. Regresyon testi:
+`TestSubscribedMaxQualitySingleLayer`. → düzeltilmiş image **`v1.11.0-vp9simulcast-fix3-dynacast2`**
+(buggy `dynacast1`'i KULLANMA).
+
 ## Rebuild
 ```bash
 cd livekit-server-source            # bu repo, branch speaknow-vp9-simulcast

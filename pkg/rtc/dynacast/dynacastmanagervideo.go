@@ -34,6 +34,11 @@ type DynacastManagerVideoParams struct {
 	DynacastPauseDelay time.Duration
 	Listener           DynacastManagerListener
 	Logger             logger.Logger
+	// SpeakNow fork #6: exact-match (yalniz izlenen katmani ac) YALNIZ cok-katmanli (simulcast,
+	// >1 layer) track'lerde guvenli. Tek-katmanli track'te (kamera) tek encoding farkli kalite
+	// slotunda olabilir (orn. rid "q"=LOW iken server quality'i HIGH sanir) -> exact-match o tek
+	// encoding'i kapatir -> kamera olur. Bu fonksiyon false donerse (veya nil) stock'a dusulur.
+	IsMultiLayer func(mimeType mime.MimeType) bool
 }
 
 type dynacastManagerVideo struct {
@@ -284,12 +289,17 @@ func (d *dynacastManagerVideo) enqueueSubscribedQualityChange() {
 			// SpeakNow fork #6: YALNIZ gercekten aboneli katmanlar (committed kume) acilir
 			//   (Meet gibi: tek izleyici 1080 -> 720/540 paused). Guard: kume bos ama max!=OFF
 			//   (ForceQuality/regress yarisi) -> guvenli tarafta upstream davranisina dus.
+			// SpeakNow fork #6: exact-match yalniz cok-katmanli track'te. Tek-katman (kamera) ya da
+			// kume bos (ForceQuality/regress yarisi) -> stock (q<=quality), tek encoding'i asla kapatma.
+			multiLayer := d.params.IsMultiLayer != nil && d.params.IsMultiLayer(mime)
 			set := d.committedSubscribedQualities[mime]
 			var subscribedQualities []*livekit.SubscribedQuality
 			for q := livekit.VideoQuality_LOW; q <= livekit.VideoQuality_HIGH; q++ {
-				enabled := set.has(q)
-				if set == 0 {
-					enabled = q <= quality
+				var enabled bool
+				if multiLayer && set != 0 {
+					enabled = set.has(q) // cok-katman -> exact-match (izlenmeyen alt katman paused)
+				} else {
+					enabled = q <= quality // tek-katman/guard -> stock (hep guvenli)
 				}
 				subscribedQualities = append(subscribedQualities, &livekit.SubscribedQuality{
 					Quality: q,
