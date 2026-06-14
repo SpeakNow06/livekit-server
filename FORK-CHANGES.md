@@ -46,6 +46,32 @@ tek uptrack); simulcast rid≥1'de rid index (`layer`) authoritative.
 ### 5. `Dockerfile` — hızlı cross-compile
 `FROM --platform=$BUILDPLATFORM` → native cross-compile (amd64), QEMU emülasyon yok (~1 dk build).
 
+### 6. `pkg/rtc/dynacast/*` — dynacast EXACT-MATCH (VP9 simulcast'ten BAĞIMSIZ özellik)
+**İstek:** Google Meet gibi — tek izleyici 1080 (HIGH) izliyorsa yayıncı (öğretmen) **yalnız
+1080** encode etsin; 720/540 **dynacast ile paused**. Upstream dynacast bunu yapmaz: tek bir
+**max** abone kalitesi tutar ve **max'in ALTINDAki her katmanı da** yayınlatır (`Enabled: q <= max`,
+`dynacastmanagervideo.go`) — alt katmanı "sıcak" tutup anında düşüş içindir, ama kimse izlemese de
+encode edilir. Sonuç: 1 öğrenci 1080 izlerken hoca 3 katman (≈6.3M) encode ediyordu.
+
+**Fix (set-based):** Upstream'in tek `max`'i yerine "hangi katmanların O AN abonesi var" **kümesi**
+(`qualitySet` bitmask) taşınır ve **yalnız o katmanlar** yayınlatılır.
+- `interfaces.go` — `qualitySet` tipi (LOW/MEDIUM/HIGH bitmask) + `dynacastQualityListener.OnUpdateMaxQualityForMime` imzasına küme eklenir.
+- `dynacastqualityvideo.go` — `updateQualityChange` her abonenin **tam** kalitesini küme'ye ekler; küme değişimi (max sabit kalsa bile) bildirim tetikler.
+- `dynacastmanagervideo.go` — `Enabled: q <= max` **→** `Enabled: küme.has(q)`. Debounce: küme **bit kaybı** (katman boşaldı) = downgrade (5 sn debounce); **bit kazancı** (katman gerekti) = anında (respin). Guard: küme boş ama max≠OFF (ForceQuality/regress yarışı) → upstream `q<=max`'a düşer.
+- `dynacastmanager_test.go` — beklenen değerler exact-match'e güncellendi.
+
+**Çok-izleyici güvenli:** yerel aboneler **exact** (540 izleyen + 1080 izleyen → orta katman paused,
+ikisi de doğru beslenir). **Cross-node** yalnız max taşıdığından (uzak node'un kümesi gelmez)
+o node'un katkısı `addUpTo(max)` ile **conservative** (tüm alt katmanlar açık) tutulur → multi-node
+bozulmaz. `maxSubscribedQualities` (receiver max-expected-layer, `mediatrack.go`) **değişmedi** = tek max.
+
+**Trade-off:** izleyici bant düşüşüyle **o an paused** alt katmana geçerken ~1-2 sn respin (keyframe).
+Boş/stabil odada tetiklenmez; dolu odada alt katmanlar zaten açık. VP9 simulcast'te paused rid'i
+**resume** yolu (#2 DD parser, #4 rid→spatial ile aynı makine) → canlı testte özellikle izlenmeli.
+
+> Not: Bu değişiklik VP9 simulcast'ten bağımsızdır; H.264 webinar simulcast'i de etkiler (orada da
+> izlenmeyen katman durur — webinar'ın zaten beklediği davranış, bkz `webinar-livekit.js` dynacast notu).
+
 ## Rebuild
 ```bash
 cd livekit-server-source            # bu repo, branch speaknow-vp9-simulcast

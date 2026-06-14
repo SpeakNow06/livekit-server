@@ -41,6 +41,9 @@ type dynacastManagerVideo struct {
 
 	maxSubscribedQuality          map[mime.MimeType]livekit.VideoQuality
 	committedMaxSubscribedQuality map[mime.MimeType]livekit.VideoQuality
+	// SpeakNow fork #6: max'in yani sira aboneli katman KUMESI (exact-match dynacast).
+	subscribedQualities          map[mime.MimeType]qualitySet
+	committedSubscribedQualities map[mime.MimeType]qualitySet
 
 	maxSubscribedQualityDebounce        func(func())
 	maxSubscribedQualityDebouncePending bool
@@ -58,6 +61,8 @@ func NewDynacastManagerVideo(params DynacastManagerVideoParams) DynacastManager 
 		params:                        params,
 		maxSubscribedQuality:          make(map[mime.MimeType]livekit.VideoQuality),
 		committedMaxSubscribedQuality: make(map[mime.MimeType]livekit.VideoQuality),
+		subscribedQualities:           make(map[mime.MimeType]qualitySet), // fork #6
+		committedSubscribedQualities:  make(map[mime.MimeType]qualitySet), // fork #6
 	}
 	if params.DynacastPauseDelay > 0 {
 		d.maxSubscribedQualityDebounce = debounce.New(params.DynacastPauseDelay)
@@ -67,6 +72,7 @@ func NewDynacastManagerVideo(params DynacastManagerVideoParams) DynacastManager 
 		OpsQueueDepth: 64,
 		OnRestart: func() {
 			d.committedMaxSubscribedQuality = make(map[mime.MimeType]livekit.VideoQuality)
+			d.committedSubscribedQualities = make(map[mime.MimeType]qualitySet) // fork #6
 		},
 		OnDynacastQualityCreate: func(mimeType mime.MimeType) dynacastQuality {
 			dq := newDynacastQualityVideo(dynacastQualityVideoParams{
@@ -78,10 +84,16 @@ func NewDynacastManagerVideo(params DynacastManagerVideoParams) DynacastManager 
 		},
 		OnRegressCodec: func(fromMime, toMime mime.MimeType) {
 			d.maxSubscribedQuality[fromMime] = livekit.VideoQuality_OFF
+			d.subscribedQualities[fromMime] = 0 // fork #6
 
 			// if the new codec is not added, notify the publisher to start publishing
 			if _, ok := d.maxSubscribedQuality[toMime]; !ok {
 				d.maxSubscribedQuality[toMime] = livekit.VideoQuality_HIGH
+				// fork #6: HIGH'a zorlarken kume'yi de TAM doldur — gercek bildirim (Replace
+				// sonrasi) gelene dek tum katmanlar yayinlansin (upstream "force HIGH" ile ayni niyet).
+				var full qualitySet
+				full.addUpTo(livekit.VideoQuality_HIGH)
+				d.subscribedQualities[toMime] = full
 			}
 		},
 		OnUpdateNeeded: d.update,
@@ -99,6 +111,12 @@ func (d *dynacastManagerVideo) ForceQuality(quality livekit.VideoQuality) {
 
 	for mime := range d.committedMaxSubscribedQuality {
 		d.committedMaxSubscribedQuality[mime] = quality
+		// fork #6: kume'yi de senkron tut (ForceQuality genelde OFF=pending-close; non-OFF'ta <=quality)
+		var set qualitySet
+		if quality != livekit.VideoQuality_OFF {
+			set.addUpTo(quality)
+		}
+		d.committedSubscribedQualities[mime] = set
 	}
 
 	d.enqueueSubscribedQualityChange()
@@ -130,10 +148,12 @@ func (d *dynacastManagerVideo) NotifySubscriberNodeMaxQuality(
 func (d *dynacastManagerVideo) OnUpdateMaxQualityForMime(
 	mime mime.MimeType,
 	maxQuality livekit.VideoQuality,
+	qualities qualitySet, // fork #6
 ) {
 	d.lock.Lock()
 	if _, ok := d.regressedCodec[mime]; !ok {
 		d.maxSubscribedQuality[mime] = maxQuality
+		d.subscribedQualities[mime] = qualities // fork #6
 	}
 	d.lock.Unlock()
 
@@ -162,11 +182,20 @@ func (d *dynacastManagerVideo) update(force bool) {
 	if !changed {
 		for mime, quality := range d.maxSubscribedQuality {
 			if cq, ok := d.committedMaxSubscribedQuality[mime]; ok {
-				if cq != quality {
+				// SpeakNow fork #6: max ayni kalsa bile aboneli katman kumesi degisebilir
+				// (orn. izlenmeyen orta katman bosaldi) -> bu da update tetikler.
+				set := d.subscribedQualities[mime]
+				cset := d.committedSubscribedQualities[mime]
+				if cq != quality || set != cset {
 					changed = true
 				}
 
 				if (cq == livekit.VideoQuality_OFF && quality != livekit.VideoQuality_OFF) || (cq != livekit.VideoQuality_OFF && quality != livekit.VideoQuality_OFF && cq < quality) {
+					downgradesOnly = false
+				}
+				// fork #6: kume YENI bit kazandiysa (bir katman yeniden gerekiyor) bu bir
+				// "upgrade" -> debounce'suz aninda gonder (izleyici o katmani simdi bekliyor).
+				if set&^cset != 0 {
 					downgradesOnly = false
 				}
 			}
@@ -218,6 +247,9 @@ func (d *dynacastManagerVideo) update(force bool) {
 	// commit change
 	d.committedMaxSubscribedQuality = make(map[mime.MimeType]livekit.VideoQuality, len(d.maxSubscribedQuality))
 	maps.Copy(d.committedMaxSubscribedQuality, d.maxSubscribedQuality)
+	// SpeakNow fork #6: kume'yi de commit et.
+	d.committedSubscribedQualities = make(map[mime.MimeType]qualitySet, len(d.subscribedQualities))
+	maps.Copy(d.committedSubscribedQualities, d.subscribedQualities)
 
 	d.enqueueSubscribedQualityChange()
 	d.lock.Unlock()
@@ -246,11 +278,22 @@ func (d *dynacastManagerVideo) enqueueSubscribedQualityChange() {
 				},
 			})
 		} else {
+			// ESKİ (upstream): her q <= quality acilir — max'in altindaki katmanlar izlenmese
+			//   de encode edilir (sicak tutulup aninda dususe izin verir):
+			//   Enabled: q <= quality
+			// SpeakNow fork #6: YALNIZ gercekten aboneli katmanlar (committed kume) acilir
+			//   (Meet gibi: tek izleyici 1080 -> 720/540 paused). Guard: kume bos ama max!=OFF
+			//   (ForceQuality/regress yarisi) -> guvenli tarafta upstream davranisina dus.
+			set := d.committedSubscribedQualities[mime]
 			var subscribedQualities []*livekit.SubscribedQuality
 			for q := livekit.VideoQuality_LOW; q <= livekit.VideoQuality_HIGH; q++ {
+				enabled := set.has(q)
+				if set == 0 {
+					enabled = q <= quality
+				}
 				subscribedQualities = append(subscribedQualities, &livekit.SubscribedQuality{
 					Quality: q,
-					Enabled: q <= quality,
+					Enabled: enabled,
 				})
 			}
 			subscribedCodecs = append(subscribedCodecs, &livekit.SubscribedCodec{
