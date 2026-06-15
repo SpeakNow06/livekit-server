@@ -17,6 +17,18 @@ up/down layer switches, `contentHint` `text` **and** `motion` both fine.
 | Net diff | 5 files, ~35 lines |
 | Turkish notes | [FORK-CHANGES.md](FORK-CHANGES.md) |
 
+## Everything for review, in one place
+For [livekit/livekit#4594](https://github.com/livekit/livekit/issues/4594) — client and server forks
+plus the write-up are all reachable from this repo:
+
+- **[VP9_SIMULCAST_PR_REPORT.md](VP9_SIMULCAST_PR_REPORT.md)** — full, line-by-line write-up of every
+  change (client + server), with `file:line`, old→new, and why.
+- **SFU (this repo)** — the server-side changes; Turkish notes in [FORK-CHANGES.md](FORK-CHANGES.md).
+- **Client SDK fork** — [`client-sdk-fork/`](client-sdk-fork/) mirrors our `livekit/client-sdk-js`
+  v2.19.0 changes (full diff + the changed source files).
+- **AV1** also works as real simulcast via the same mechanism — one extra line (`skipReferenceTS` in
+  the AV1 branch), no client change. Verified in production.
+
 ## Why VP9 simulcast (vs SVC)?
 Per-viewer **resolution** adaptation at **constant fps** (weak viewer → lower-res rid; fps stays),
 plus Android **hardware decode** of single-spatial rids. VP9 **SVC** doesn't give this
