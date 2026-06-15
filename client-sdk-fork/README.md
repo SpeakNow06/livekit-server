@@ -14,6 +14,8 @@ write-up in [`../VP9_SIMULCAST_PR_REPORT.md`](../VP9_SIMULCAST_PR_REPORT.md).
 
 - **`client-sdk-js-2.19.0-vp9simulcast.diff`** — the complete `git diff` vs the v2.19.0 base. Apply
   with `git apply` on a clean `client-sdk-js` v2.19.0 checkout.
+- **`livekit-client-2.19.0-svc.umd.js`** — the prebuilt UMD bundle (this fork, built from the source
+  below); drop-in for a `<script>` tag, no build step needed.
 - **`src/…`** — the 4 changed source files in their original paths, for direct viewing:
   - `src/room/participant/LocalParticipant.ts` — mode signalling, skip SVC defaults under simulcast,
     respect caller `contentHint`/`scalabilityMode`, `svcMode` flag.
