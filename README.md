@@ -13,7 +13,7 @@ up/down layer switches, `contentHint` `text` **and** `motion` both fine.
 | | |
 |---|---|
 | This branch | `vp9-av1-simulcast-server` — the SFU (server) fork |
-| Client branch | [`vp9-av1-simulcast-client`](../../tree/vp9-av1-simulcast-client) — the `client-sdk-js` fork |
+| Client branch | [`vp9-av1-simulcast-client`](https://github.com/SpeakNow06/livekit-server/tree/vp9-av1-simulcast-client) — the `client-sdk-js` fork |
 | Base | v1.11.0 (`8ccad68`) |
 | Image | `ghcr.io/speaknow06/livekit-server:v1.11.0-vp9simulcast-fix3-dynacast2-av1` |
 | Turkish notes | [FORK-CHANGES.md](FORK-CHANGES.md) |
@@ -26,7 +26,7 @@ write-up live in this repo across two branches:
   of every change (client + server), with `file:line`, old→new, and why.
 - **SFU fork — this branch (`vp9-av1-simulcast-server`)** — the server-side changes; Turkish notes in
   [FORK-CHANGES.md](FORK-CHANGES.md).
-- **Client SDK fork — branch [`vp9-av1-simulcast-client`](../../tree/vp9-av1-simulcast-client)** —
+- **Client SDK fork — branch [`vp9-av1-simulcast-client`](https://github.com/SpeakNow06/livekit-server/tree/vp9-av1-simulcast-client)** —
   our `livekit/client-sdk-js` v2.19.0 changes (full diff + changed files + prebuilt UMD bundle).
 - **AV1** works as real simulcast via the same mechanism — one extra line (`skipReferenceTS` in the
   AV1 branch), no client change. Verified in production.
