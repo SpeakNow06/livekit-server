@@ -400,6 +400,12 @@ func (f *Forwarder) DetermineCodec(codec webrtc.RTPCodecCapability, extensions [
 	case mime.MimeTypeAV1:
 		f.codecMunger = codecmunger.NewNull(f.logger)
 		if sfuutils.IsSimulcastMode(videoLayerMode) {
+			// SPEAKNOW FORK (AV1 simulcast): VP9 simulcast ile ayni gerekce -> AV1 simulcast'te de
+			// per-katman RTCP Sender Report'lar guvenilmez -> SR-tabanli cross-layer timestamp offset
+			// yanlis cikip layer switch'i reddediyor. skipReferenceTS=true -> SR-offset atlanir,
+			// gec-sure tabanli (extExpectedTS) timestamp kullanilir. (AV1 case'i Simulcast selector'u
+			// zaten stock'ta kullaniyor; VP9'dan farkli olarak tek eksik buydu.) TEST EDILMEDI.
+			f.skipReferenceTS = true
 			if f.vls != nil {
 				f.vls = videolayerselector.NewSimulcastFromOther(f.vls)
 			} else {

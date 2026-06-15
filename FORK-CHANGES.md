@@ -34,6 +34,12 @@ YALNIZ StructureId gerçekten değişince ilerler. `ExtKeyFrameNum` (DD selector
 - **(b) Simulcast selector** (DD selector yerine, ilk-kurulumda): DD selector VP9 simulcast'i (ayrı
   stream'ler) yanlış yönetip neredeyse her frame'de "switch" raporluyordu. Simulcast selector ayrı-stream
   modelini doğru kullanır (keyframe'de switch).
+- **(c) AV1 simulcast (2026-06-15):** Aynı dosyada `case mime.MimeTypeAV1` simulcast dalına da
+  `f.skipReferenceTS = true` eklendi (VP9 ile birebir gerekçe — per-katman RTCP SR güvenilmez). AV1
+  case'i Simulcast selector'u zaten stock'ta kullanıyordu; #4 (rid→spatial) ve #2 (DD parser drop
+  eşiği) codec-agnostik olduğu için AV1'e otomatik uygulanıyor → **tek eksik buydu.** Prod'da AV1
+  simulcast (contentHint='text' dahil) test edildi, çalışıyor. (Client AV1'i `isSVCCodec` ile zaten
+  destekliyor; ayrı client değişikliği gerekmedi.)
 
 ### 4. `pkg/sfu/receiver_base.go` — VP9 simulcast rid→spatial layer eşlemesi  (ASIL KÖK)
 `if extPkt.Spatial >= 0 { spatialLayer = extPkt.Spatial }` — SVC için spatial'ı paketten (DD SID)
