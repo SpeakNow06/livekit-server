@@ -1,4 +1,4 @@
-# SpeakNow LiveKit Server Fork — VP9 Simulcast Desteği
+# SpeakNow LiveKit Server Fork — VP9/AV1 Simulcast Desteği
 
 `livekit/livekit` **v1.11.0** üzerine **minimal** fork (5 dosya, ~35 satır).
 Amaç: **VP9 simulcast** desteği (upstream'de bilerek KAPALI — LiveKit VP9'u SVC sayar,

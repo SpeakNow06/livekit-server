@@ -1,9 +1,10 @@
-# livekit-server — VP9 Simulcast Fork (SpeakNow)
+# livekit-server — VP9/AV1 Simulcast Fork (SpeakNow)
 
 A minimal fork of [`livekit/livekit`](https://github.com/livekit/livekit) **v1.11.0** that makes
-**VP9 simulcast** work end-to-end. LiveKit treats VP9 as an SVC-only codec — the `simulcast` field
-is ignored for VP9, and VP9 simulcast (`ONE_SPATIAL_LAYER_PER_STREAM`, a separate RTP stream per
-spatial resolution) is unimplemented. This fork adds the four missing SFU pieces.
+**VP9 and AV1 simulcast** work end-to-end. LiveKit treats VP9/AV1 as SVC-only codecs — the
+`simulcast` field is ignored for them, and rid-based simulcast (`ONE_SPATIAL_LAYER_PER_STREAM`, a
+separate RTP stream per spatial resolution) is unimplemented. This fork adds the missing SFU pieces
+for both VP9 and AV1.
 
 ✅ **Status:** running in production since 2026-06-13. Single and multiple subscribers, per-viewer
 resolution adaptation (a weak viewer drops to a lower-res rid while others stay higher), clean
@@ -11,25 +12,26 @@ up/down layer switches, `contentHint` `text` **and** `motion` both fine.
 
 | | |
 |---|---|
-| Branch | `speaknow-vp9-simulcast` |
+| This branch | `vp9-av1-simulcast-server` — the SFU (server) fork |
+| Client branch | [`vp9-av1-simulcast-client`](../../tree/vp9-av1-simulcast-client) — the `client-sdk-js` fork |
 | Base | v1.11.0 (`8ccad68`) |
-| Image | `ghcr.io/speaknow06/livekit-server:v1.11.0-vp9simulcast-fix3` |
-| Net diff | 5 files, ~35 lines |
+| Image | `ghcr.io/speaknow06/livekit-server:v1.11.0-vp9simulcast-fix3-dynacast2-av1` |
 | Turkish notes | [FORK-CHANGES.md](FORK-CHANGES.md) |
 
 ## Everything for review, in one place
-For [livekit/livekit#4594](https://github.com/livekit/livekit/issues/4594) — client and server forks
-plus the write-up are all reachable from this repo:
+For [livekit/livekit#4594](https://github.com/livekit/livekit/issues/4594) — both forks plus the
+write-up live in this repo across two branches:
 
-- **[VP9_SIMULCAST_PR_REPORT.md](VP9_SIMULCAST_PR_REPORT.md)** — full, line-by-line write-up of every
-  change (client + server), with `file:line`, old→new, and why.
-- **SFU (this repo)** — the server-side changes; Turkish notes in [FORK-CHANGES.md](FORK-CHANGES.md).
-- **Client SDK fork** — [`client-sdk-fork/`](client-sdk-fork/) mirrors our `livekit/client-sdk-js`
-  v2.19.0 changes (full diff + the changed source files).
-- **AV1** also works as real simulcast via the same mechanism — one extra line (`skipReferenceTS` in
-  the AV1 branch), no client change. Verified in production.
+- **[`VP9_AV1_SIMULCAST_PR_REPORT.md`](VP9_AV1_SIMULCAST_PR_REPORT.md)** — full, line-by-line write-up
+  of every change (client + server), with `file:line`, old→new, and why.
+- **SFU fork — this branch (`vp9-av1-simulcast-server`)** — the server-side changes; Turkish notes in
+  [FORK-CHANGES.md](FORK-CHANGES.md).
+- **Client SDK fork — branch [`vp9-av1-simulcast-client`](../../tree/vp9-av1-simulcast-client)** —
+  our `livekit/client-sdk-js` v2.19.0 changes (full diff + changed files + prebuilt UMD bundle).
+- **AV1** works as real simulcast via the same mechanism — one extra line (`skipReferenceTS` in the
+  AV1 branch), no client change. Verified in production.
 
-## Why VP9 simulcast (vs SVC)?
+## Why VP9/AV1 simulcast (vs SVC)?
 Per-viewer **resolution** adaptation at **constant fps** (weak viewer → lower-res rid; fps stays),
 plus Android **hardware decode** of single-spatial rids. VP9 **SVC** doesn't give this
 (screen-content/`text` collapses spatial to one; Android falls back to software decode); VP9

@@ -1,6 +1,6 @@
-# VP9 Simulcast (`ONE_SPATIAL_LAYER_PER_STREAM`) — implementation notes
+# VP9/AV1 Simulcast (`ONE_SPATIAL_LAYER_PER_STREAM`) — implementation notes
 
-End-to-end support for **VP9 simulcast** on LiveKit: three independent single-spatial-layer
+End-to-end support for **VP9 and AV1 simulcast** on LiveKit: three independent single-spatial-layer
 RTP streams (rids `q`/`h`/`f`, each with its own SSRC) instead of one SVC stream.
 
 For upstream issue [livekit/livekit#4594](https://github.com/livekit/livekit/issues/4594).
