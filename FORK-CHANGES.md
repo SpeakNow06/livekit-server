@@ -1,6 +1,34 @@
-# SpeakNow LiveKit Server Fork — VP9/AV1 Simulcast Desteği
+# SpeakNow LiveKit Server Fork — VP9/AV1 Simulcast + SFU-içi Ses Gürültü Temizliği
 
-`livekit/livekit` **v1.11.0** üzerine **minimal** fork (5 dosya, ~35 satır).
+`livekit/livekit` **v1.11.0** üzerine fork. İki ana özellik:
+1. **VP9/AV1 simulcast** (upstream'de bilerek KAPALI) + ipv6 TURN fix — aşağıdaki 6 madde.
+2. **AUDIO-NC**: SFU-içi mikrofon gürültü temizliği (DeepFilterNet3, Google Meet modeli).
+
+## AUDIO-NC (SFU-içi ses gürültü temizliği) — 2026-07-16
+
+Mikrofon Opus/RED paketini SFU'nun içinde, yayıncı-track başına TEK noktada
+(forwardRTP, abonelere dağıtımdan önce) çöz→DFN3→yeniden-kodla→payload'ı yerinde
+değiştir. Ayrı bot mimarisinin ~195ms ek gecikmesine karşılık **ölçülen ~23ms**
+(prod, izole test: baz 231ms → denoise 254ms). Gürültü bastırma ~64dB (debug).
+
+- **Yeni paket:** `pkg/sfu/audiodenoise/` — `native.go` (purego ile libdf+libopus
+  dlopen, cgo YOK → CGO_ENABLED=0 statik build korunur), `processor.go` (per-track
+  decode/DFN/encode, gecikme-öncelikli: sıra penceresi yok+PLC+geç-kare-düşür, her
+  yol fail-open), `red.go` (RFC2198 ayrıştır/yeniden-kur).
+- **Hook:** `pkg/sfu/receiver_base.go` `forwardRTP` — yalnız MİKROFON opus/red (ekran
+  sesi hariç), `SN_DENOISE=1` iken; processor goroutine-local (kilitsiz).
+- **Dockerfile:** 3 aşama (rust→libdf.so, go→binary, debian-slim+libopus+model);
+  final Alpine→debian-slim (glibc libdf için). `go.mod`: purego v0.8.2.
+- **Env:** `SN_DENOISE=1` (ana anahtar; yoksa kod path'i hiç girilmez, düz fork gibi),
+  `SN_DENOISE_ATTEN_DB` (bastırma tavanı, 100=tam; daha doğal için 30-50).
+- **Image:** `ghcr.io/speaknow06/livekit-server:v1.11.0-audionc1`.
+- **Doğrulama (prod izole test):** native yükleme OK, mikrofon audio/opus+red
+  işleniyor, DFN3 konuşma korur+gürültü siler, ~23ms ek gecikme, çift-ses riski YOK
+  (ayrı track yok). AÇIK: gerçek insan sesiyle canlı test + atten_lim ayarı.
+
+---
+
+## VP9/AV1 Simulcast — minimal fork (5 dosya, ~35 satır)
 Amaç: **VP9 simulcast** desteği (upstream'de bilerek KAPALI — LiveKit VP9'u SVC sayar,
 `simulcast` alanını yok sayar) + ipv6 TURN fix.
 

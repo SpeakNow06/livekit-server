@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	opusApplicationVoIP = 2049 // OPUS_APPLICATION_VOIP
+	opusApplicationVoIP = 2048 // OPUS_APPLICATION_VOIP (opus_defines.h)
 	maxPCMSamples       = 5760 // 120ms @ 48k — opus_decode üst sınırı
 )
 
