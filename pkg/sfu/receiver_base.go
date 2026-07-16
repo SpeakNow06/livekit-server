@@ -34,6 +34,7 @@ import (
 	"github.com/livekit/protocol/utils/mono"
 
 	"github.com/livekit/livekit-server/pkg/sfu/audio"
+	"github.com/livekit/livekit-server/pkg/sfu/audiodenoise"
 	"github.com/livekit/livekit-server/pkg/sfu/buffer"
 	"github.com/livekit/livekit-server/pkg/sfu/rtpstats"
 	"github.com/livekit/livekit-server/pkg/sfu/streamtracker"
@@ -982,6 +983,20 @@ func (r *ReceiverBase) forwardRTP(
 		return
 	}
 
+	// SPEAKNOW FORK (AUDIO-NC): SFU-içi mikrofon gürültü temizliği. Yalnız mikrofon
+	// Opus/RED track'inde (ekran sesi=müzik hariç) ve SN_DENOISE=1 iken kurulur.
+	// Processor bu goroutine'e ÖZELdir (forwardRTP tek goroutine/audio-buffer) → kilitsiz.
+	// nil dönerse (kurulum hatası) hook tamamen atlanır = ham ses geçer (fail-open).
+	var denoiser *audiodenoise.Processor
+	if layer == 0 && mime.IsMimeTypeStringAudio(r.params.Codec.MimeType) &&
+		r.trackInfo != nil && r.trackInfo.Source == livekit.TrackSource_MICROPHONE &&
+		audiodenoise.Enabled() {
+		denoiser = audiodenoise.NewProcessor(r.isRED, r.params.Logger)
+		if denoiser != nil {
+			defer denoiser.Close()
+		}
+	}
+
 	pktBuf := make([]byte, bucket.RTPMaxPktSize)
 	r.params.Logger.Debugw(
 		"starting forwarding",
@@ -1029,6 +1044,20 @@ func (r *ReceiverBase) forwardRTP(
 			)
 			numPacketsDropped++
 			continue
+		}
+
+		// SPEAKNOW FORK (AUDIO-NC): payload'ı temizlenmişle YERİNDE değiştir. extPkt
+		// hem downtrack'lere hem RED transformer'a bu haliyle gider → tüm aboneler
+		// (opus + red) temiz ses alır. Drop = geç gelen kare (abone zaten kayıp saydı).
+		if denoiser != nil {
+			if newPayload, action := denoiser.ProcessPacket(
+				extPkt.Packet.SequenceNumber, extPkt.Packet.Timestamp, extPkt.Packet.Payload,
+			); action == audiodenoise.ActionReplace {
+				extPkt.Packet.Payload = newPayload
+			} else if action == audiodenoise.ActionDrop {
+				numPacketsDropped++
+				continue
+			}
 		}
 
 		var writeCount atomic.Int32

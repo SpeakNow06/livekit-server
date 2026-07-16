@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/bep/debounce v1.2.1
 	github.com/d5/tengo/v2 v2.17.0
+	github.com/ebitengine/purego v0.8.2 // SPEAKNOW FORK (AUDIO-NC): cgo'suz libdf/libopus dlopen
 	github.com/dennwc/iters v1.2.2
 	github.com/dustin/go-humanize v1.0.1
 	github.com/elliotchance/orderedmap/v3 v3.1.0
