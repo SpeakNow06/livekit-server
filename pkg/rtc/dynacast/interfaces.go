@@ -116,30 +116,8 @@ func (d *dynacastManagerNull) ClearSubscriberNodes() {}
 
 // ------------------------------------------------
 
-// qualitySet — SpeakNow fork (#6, dynacast exact-match): livekit.VideoQuality
-// (LOW/MEDIUM/HIGH) uzerinde bit maskesi. "Hangi spatial katmanlarin O AN bir
-// abonesi var" kumesini tutar. Upstream dynacast YALNIZ tek bir max degeri tasir
-// ve max'in ALTINDAki her katmani da yayinlatir (alt katman sicak kalsin -> aninda
-// dusus). Bu fork kume'yi de tasiyip yalniz gercekten izlenen katmanlari yayinlatir
-// (Google Meet gibi: tek izleyici 1080 izliyorsa 720/540 encode edilmez).
-type qualitySet uint32
-
-func (s qualitySet) has(q livekit.VideoQuality) bool { return s&(1<<uint(q)) != 0 }
-func (s *qualitySet) add(q livekit.VideoQuality)     { *s |= 1 << uint(q) }
-
-// addUpTo: <= q olan tum katmanlari ekler. Cross-node yolunda kullanilir: uzak node
-// yalniz kendi max'ini bildirir (kume bilgisi gelmez) -> o node'un katkisini upstream
-// gibi conservative (tum alt katmanlar acik) tutar ki uzak abonelerin alt katmanlari kapanmasin.
-func (s *qualitySet) addUpTo(q livekit.VideoQuality) {
-	for qq := livekit.VideoQuality_LOW; qq <= q; qq++ {
-		s.add(qq)
-	}
-}
-
 type dynacastQualityListener interface {
-	// ESKİ: OnUpdateMaxQualityForMime(mimeType mime.MimeType, maxQuality livekit.VideoQuality)
-	// SpeakNow fork #6: max'in yani sira aboneli katman kumesi (qualities) de tasinir.
-	OnUpdateMaxQualityForMime(mimeType mime.MimeType, maxQuality livekit.VideoQuality, qualities qualitySet)
+	OnUpdateMaxQualityForMime(mimeType mime.MimeType, maxQuality livekit.VideoQuality)
 	OnUpdateAudioCodecForMime(mimeType mime.MimeType, enabled bool)
 }
 
@@ -151,7 +129,6 @@ type dynacastQualityListenerNull struct {
 func (d *dynacastQualityListenerNull) OnUpdateMaxQualityForMime(
 	mimeType mime.MimeType,
 	maxQuality livekit.VideoQuality,
-	qualities qualitySet, // SpeakNow fork #6
 ) {
 }
 

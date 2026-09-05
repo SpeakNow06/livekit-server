@@ -51,7 +51,6 @@ func TestSubscribedMaxQuality(t *testing.T) {
 		actualSubscribedQualities := make([]*livekit.SubscribedCodec, 0)
 
 		dm := NewDynacastManagerVideo(DynacastManagerVideoParams{
-			IsMultiLayer: func(mime.MimeType) bool { return true }, // fork #6: cok-katman (exact-match aktif)
 			Listener: &testDynacastManagerListener{
 				onSubscribedMaxQualityChange: func(subscribedQualities []*livekit.SubscribedCodec) {
 					lock.Lock()
@@ -67,8 +66,6 @@ func TestSubscribedMaxQuality(t *testing.T) {
 		// mute all subscribers of vp8
 		dm.NotifySubscriberMaxQuality("s1", mime.MimeTypeVP8, livekit.VideoQuality_OFF)
 
-		// SpeakNow fork #6: VP8 tum aboneler mute -> hepsi kapali. AV1 tek abone (s2) HIGH ->
-		// yalniz HIGH acik (LOW/MEDIUM kapali). ESKİ (all-below): AV1 LOW/MEDIUM de aciliyordu.
 		expectedSubscribedQualities := []*livekit.SubscribedCodec{
 			{
 				Codec: mime.MimeTypeVP8.String(),
@@ -81,8 +78,8 @@ func TestSubscribedMaxQuality(t *testing.T) {
 			{
 				Codec: mime.MimeTypeAV1.String(),
 				Qualities: []*livekit.SubscribedQuality{
-					{Quality: livekit.VideoQuality_LOW, Enabled: false},
-					{Quality: livekit.VideoQuality_MEDIUM, Enabled: false},
+					{Quality: livekit.VideoQuality_LOW, Enabled: true},
+					{Quality: livekit.VideoQuality_MEDIUM, Enabled: true},
 					{Quality: livekit.VideoQuality_HIGH, Enabled: true},
 				},
 			},
@@ -100,7 +97,6 @@ func TestSubscribedMaxQuality(t *testing.T) {
 		actualSubscribedQualities := make([]*livekit.SubscribedCodec, 0)
 
 		dm := NewDynacastManagerVideo(DynacastManagerVideoParams{
-			IsMultiLayer: func(mime.MimeType) bool { return true }, // fork #6: cok-katman (exact-match aktif)
 			Listener: &testDynacastManagerListener{
 				onSubscribedMaxQualityChange: func(subscribedQualities []*livekit.SubscribedCodec) {
 					lock.Lock()
@@ -118,13 +114,11 @@ func TestSubscribedMaxQuality(t *testing.T) {
 		dm.NotifySubscriberMaxQuality("s2", mime.MimeTypeVP8, livekit.VideoQuality_MEDIUM)
 		dm.NotifySubscriberMaxQuality("s3", mime.MimeTypeAV1, livekit.VideoQuality_MEDIUM)
 
-		// SpeakNow fork #6 (exact-match): VP8 abonesi {HIGH, MEDIUM} -> LOW kapali (kimse izlemiyor);
-		// AV1 abonesi {MEDIUM} -> LOW kapali. ESKİ (all-below): VP8/AV1 LOW da aciliyordu.
 		expectedSubscribedQualities := []*livekit.SubscribedCodec{
 			{
 				Codec: mime.MimeTypeVP8.String(),
 				Qualities: []*livekit.SubscribedQuality{
-					{Quality: livekit.VideoQuality_LOW, Enabled: false},
+					{Quality: livekit.VideoQuality_LOW, Enabled: true},
 					{Quality: livekit.VideoQuality_MEDIUM, Enabled: true},
 					{Quality: livekit.VideoQuality_HIGH, Enabled: true},
 				},
@@ -132,7 +126,7 @@ func TestSubscribedMaxQuality(t *testing.T) {
 			{
 				Codec: mime.MimeTypeAV1.String(),
 				Qualities: []*livekit.SubscribedQuality{
-					{Quality: livekit.VideoQuality_LOW, Enabled: false},
+					{Quality: livekit.VideoQuality_LOW, Enabled: true},
 					{Quality: livekit.VideoQuality_MEDIUM, Enabled: true},
 					{Quality: livekit.VideoQuality_HIGH, Enabled: false},
 				},
@@ -146,14 +140,13 @@ func TestSubscribedMaxQuality(t *testing.T) {
 		}, 10*time.Second, 100*time.Millisecond)
 
 		// "s1" dropping to MEDIUM should disable HIGH layer
-		// SpeakNow fork #6: VP8 aboneleri {MEDIUM} -> yalniz MEDIUM acik (LOW da kapali). AV1 {MEDIUM} ayni.
 		dm.NotifySubscriberMaxQuality("s1", mime.MimeTypeVP8, livekit.VideoQuality_MEDIUM)
 
 		expectedSubscribedQualities = []*livekit.SubscribedCodec{
 			{
 				Codec: mime.MimeTypeVP8.String(),
 				Qualities: []*livekit.SubscribedQuality{
-					{Quality: livekit.VideoQuality_LOW, Enabled: false},
+					{Quality: livekit.VideoQuality_LOW, Enabled: true},
 					{Quality: livekit.VideoQuality_MEDIUM, Enabled: true},
 					{Quality: livekit.VideoQuality_HIGH, Enabled: false},
 				},
@@ -161,7 +154,7 @@ func TestSubscribedMaxQuality(t *testing.T) {
 			{
 				Codec: mime.MimeTypeAV1.String(),
 				Qualities: []*livekit.SubscribedQuality{
-					{Quality: livekit.VideoQuality_LOW, Enabled: false},
+					{Quality: livekit.VideoQuality_LOW, Enabled: true},
 					{Quality: livekit.VideoQuality_MEDIUM, Enabled: true},
 					{Quality: livekit.VideoQuality_HIGH, Enabled: false},
 				},
@@ -311,7 +304,6 @@ func TestCodecRegression(t *testing.T) {
 		actualSubscribedQualities := make([]*livekit.SubscribedCodec, 0)
 
 		dm := NewDynacastManagerVideo(DynacastManagerVideoParams{
-			IsMultiLayer: func(mime.MimeType) bool { return true }, // fork #6: cok-katman (exact-match aktif)
 			Listener: &testDynacastManagerListener{
 				onSubscribedMaxQualityChange: func(subscribedQualities []*livekit.SubscribedCodec) {
 					lock.Lock()
@@ -323,13 +315,12 @@ func TestCodecRegression(t *testing.T) {
 
 		dm.NotifySubscriberMaxQuality("s1", mime.MimeTypeAV1, livekit.VideoQuality_HIGH)
 
-		// SpeakNow fork #6: tek abone HIGH -> yalniz HIGH acik (LOW/MEDIUM kapali).
 		expectedSubscribedQualities := []*livekit.SubscribedCodec{
 			{
 				Codec: mime.MimeTypeAV1.String(),
 				Qualities: []*livekit.SubscribedQuality{
-					{Quality: livekit.VideoQuality_LOW, Enabled: false},
-					{Quality: livekit.VideoQuality_MEDIUM, Enabled: false},
+					{Quality: livekit.VideoQuality_LOW, Enabled: true},
+					{Quality: livekit.VideoQuality_MEDIUM, Enabled: true},
 					{Quality: livekit.VideoQuality_HIGH, Enabled: true},
 				},
 			},
@@ -370,7 +361,6 @@ func TestCodecRegression(t *testing.T) {
 
 		// av1 quality change should be forwarded to vp8
 		// av1 quality change of node should be ignored
-		// SpeakNow fork #6: forward edilen abone MEDIUM -> VP8 yalniz MEDIUM acik (LOW kapali).
 		dm.NotifySubscriberMaxQuality("s1", mime.MimeTypeAV1, livekit.VideoQuality_MEDIUM)
 		dm.NotifySubscriberNodeMaxQuality("n1", []types.SubscribedCodecQuality{
 			{CodecMime: mime.MimeTypeAV1, Quality: livekit.VideoQuality_HIGH},
@@ -387,7 +377,7 @@ func TestCodecRegression(t *testing.T) {
 			{
 				Codec: mime.MimeTypeVP8.String(),
 				Qualities: []*livekit.SubscribedQuality{
-					{Quality: livekit.VideoQuality_LOW, Enabled: false},
+					{Quality: livekit.VideoQuality_LOW, Enabled: true},
 					{Quality: livekit.VideoQuality_MEDIUM, Enabled: true},
 					{Quality: livekit.VideoQuality_HIGH, Enabled: false},
 				},
@@ -505,64 +495,6 @@ func TestCodecRegression(t *testing.T) {
 		}, 10*time.Second, 100*time.Millisecond)
 
 	})
-}
-
-// SpeakNow fork #6 REGRESYON testi: TEK-KATMAN track (kamera). IsMultiLayer=false -> exact-match
-// UYGULANMAZ, stock (q<=max) kalir. Kameranin tek encoding'i HIGH'in altinda bir slotta (rid "q"=LOW)
-// olsa bile asla kapanmaz. Bu test, dynacast1 image'inda kamerayi olduren regresyonu yakalar.
-func TestSubscribedMaxQualitySingleLayer(t *testing.T) {
-	var lock sync.Mutex
-	actualSubscribedQualities := make([]*livekit.SubscribedCodec, 0)
-
-	dm := NewDynacastManagerVideo(DynacastManagerVideoParams{
-		IsMultiLayer: func(mime.MimeType) bool { return false }, // tek-katman (kamera)
-		Listener: &testDynacastManagerListener{
-			onSubscribedMaxQualityChange: func(subscribedQualities []*livekit.SubscribedCodec) {
-				lock.Lock()
-				actualSubscribedQualities = subscribedQualities
-				lock.Unlock()
-			},
-		},
-	})
-
-	// Tek abone HIGH ister. exact-match olsaydi YALNIZ HIGH acilir, tek encoding "q"(LOW) slotunda
-	// oldugu icin kapanir -> kamera olurdu. Tek-katman -> stock: LOW+MED+HIGH HEPSI acik.
-	dm.NotifySubscriberMaxQuality("s1", mime.MimeTypeVP8, livekit.VideoQuality_HIGH)
-	expectedSubscribedQualities := []*livekit.SubscribedCodec{
-		{
-			Codec: mime.MimeTypeVP8.String(),
-			Qualities: []*livekit.SubscribedQuality{
-				{Quality: livekit.VideoQuality_LOW, Enabled: true},
-				{Quality: livekit.VideoQuality_MEDIUM, Enabled: true},
-				{Quality: livekit.VideoQuality_HIGH, Enabled: true},
-			},
-		},
-	}
-	require.Eventually(t, func() bool {
-		lock.Lock()
-		defer lock.Unlock()
-
-		return subscribedCodecsAsString(expectedSubscribedQualities) == subscribedCodecsAsString(actualSubscribedQualities)
-	}, 10*time.Second, 100*time.Millisecond)
-
-	// Abone MEDIUM'a duser -> stock: LOW+MED acik, HIGH kapali (tek encoding/LOW yine asla kapanmaz).
-	dm.NotifySubscriberMaxQuality("s1", mime.MimeTypeVP8, livekit.VideoQuality_MEDIUM)
-	expectedSubscribedQualities = []*livekit.SubscribedCodec{
-		{
-			Codec: mime.MimeTypeVP8.String(),
-			Qualities: []*livekit.SubscribedQuality{
-				{Quality: livekit.VideoQuality_LOW, Enabled: true},
-				{Quality: livekit.VideoQuality_MEDIUM, Enabled: true},
-				{Quality: livekit.VideoQuality_HIGH, Enabled: false},
-			},
-		},
-	}
-	require.Eventually(t, func() bool {
-		lock.Lock()
-		defer lock.Unlock()
-
-		return subscribedCodecsAsString(expectedSubscribedQualities) == subscribedCodecsAsString(actualSubscribedQualities)
-	}, 10*time.Second, 100*time.Millisecond)
 }
 
 func subscribedCodecsAsString(c1 []*livekit.SubscribedCodec) string {

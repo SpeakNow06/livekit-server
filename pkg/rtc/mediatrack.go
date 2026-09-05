@@ -34,6 +34,7 @@ import (
 	"github.com/livekit/livekit-server/pkg/rtc/types"
 	"github.com/livekit/livekit-server/pkg/sfu"
 	"github.com/livekit/livekit-server/pkg/sfu/buffer"
+	"github.com/livekit/livekit-server/pkg/sfu/rawrec"
 	"github.com/livekit/livekit-server/pkg/sfu/connectionquality"
 	"github.com/livekit/livekit-server/pkg/sfu/interceptor"
 	"github.com/livekit/livekit-server/pkg/telemetry"
@@ -147,11 +148,6 @@ func NewMediaTrack(params MediaTrackParams, ti *livekit.TrackInfo) *MediaTrack {
 			DynacastPauseDelay: params.VideoConfig.DynacastPauseDelay,
 			Listener:           t,
 			Logger:             params.Logger,
-			// SpeakNow fork #6: exact-match yalniz cok-katmanli (>1 layer) track'te (ekran simulcast).
-			// Tek-katmanli (kamera) -> stock kalir (exact-match tek encoding'i kapatip kamerayi oldurur).
-			IsMultiLayer: func(m mime.MimeType) bool {
-				return len(buffer.GetVideoLayersForMimeType(m, t.MediaTrackReceiver.TrackInfo())) > 1
-			},
 		})
 
 	case livekit.TrackType_AUDIO:
@@ -165,6 +161,21 @@ func NewMediaTrack(params MediaTrackParams, ti *livekit.TrackInfo) *MediaTrack {
 	t.MediaTrackReceiver.OnSetupReceiver(func(mime mime.MimeType) {
 		if t.dynacastManager != nil {
 			t.dynacastManager.AddCodec(mime)
+
+			// SPEAKNOW FORK (RAWREC — Aşama 2): ÜST KATMANI UYANIK TUT.
+			// dynacast izlenmeyen katmanın encoder'ını durduruyor. Bot HIGH
+			// istiyor ama abone olup isteği iletene kadar üst katman HİÇ
+			// gönderilmiyor ve SFU göndermediği kareyi yazamıyor — kayıt
+			// 176'da paylaşımın ilk 8,3 saniyesi üst katmanda tek donuk
+			// kare kaldı (kayıt 114'te aynı şey 20,4 saniye sürmüştü).
+			// Kayıt sunucuda başladığına göre isteği de sunucu yapsın.
+			// Ayrıntı ve kapatma anahtarı: rawrec.PinHigh().
+			if ti.Type == livekit.TrackType_VIDEO && rawrec.PinHigh() {
+				t.dynacastManager.NotifySubscriberMaxQuality(
+					rawrec.SanalAboneID, mime, livekit.VideoQuality_HIGH)
+				params.Logger.Infow("rawrec: üst simulcast katmanı sabitlendi",
+					"mime", mime.String(), "kaynak", ti.Source.String())
+			}
 		}
 	})
 	t.MediaTrackReceiver.OnSubscriberMaxQualityChange(
@@ -317,6 +328,12 @@ func (t *MediaTrack) AddReceiver(receiver *webrtc.RTPReceiver, track sfu.TrackRe
 			case *rtcp.SourceDescription:
 			case *rtcp.SenderReport:
 				if pkt.SSRC == uint32(track.SSRC()) {
+					// ⚠ BU ÇİFT (RtpTimestamp ↔ NtpTimestamp) YAYINCININ KENDİ
+					// SAATİNİ TAŞIYOR ve SFU dışında hiçbir yerden görülemiyor:
+					// LiveKit RTCP'yi sonlandırıp abonelere KENDİ saatiyle SR
+					// üretiyor, tarayıcı API'leri de ham çifti vermiyor.
+					// Ders kaydının ses/görüntü hizalaması buna dayanacak —
+					// bkz. monopol/docs/split-recording/SFU-HAM-YAKALAMA-PLANI.md
 					buff.SetSenderReportData(&livekit.RTCPSenderReportState{
 						RtpTimestamp: pkt.RTPTime,
 						NtpTimestamp: pkt.NTPTime,

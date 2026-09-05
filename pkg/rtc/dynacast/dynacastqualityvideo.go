@@ -45,7 +45,6 @@ type dynacastQualityVideo struct {
 	maxSubscriberQuality     map[livekit.ParticipantID]livekit.VideoQuality
 	maxSubscriberNodeQuality map[livekit.NodeID]livekit.VideoQuality
 	maxSubscribedQuality     livekit.VideoQuality
-	subscribedQualities      qualitySet // SpeakNow fork #6: aboneli katman kumesi (max degil)
 	maxQualityTimer          *time.Timer
 	regressTo                dynacastQuality
 
@@ -193,48 +192,35 @@ func (d *dynacastQualityVideo) reset() {
 func (d *dynacastQualityVideo) updateQualityChange(force bool) {
 	d.lock.Lock()
 	maxSubscribedQuality := livekit.VideoQuality_OFF
-	// SpeakNow fork #6: tek max'in yani sira aboneli katmanlarin KUMESI hesaplanir.
-	var subscribedQualities qualitySet
 	for _, subQuality := range d.maxSubscriberQuality {
-		if subQuality != livekit.VideoQuality_OFF {
-			subscribedQualities.add(subQuality) // yerel abone: tam o katman (exact)
-		}
 		if maxSubscribedQuality == livekit.VideoQuality_OFF || (subQuality != livekit.VideoQuality_OFF && subQuality > maxSubscribedQuality) {
 			maxSubscribedQuality = subQuality
 		}
 	}
 	for _, nodeQuality := range d.maxSubscriberNodeQuality {
-		if nodeQuality != livekit.VideoQuality_OFF {
-			subscribedQualities.addUpTo(nodeQuality) // uzak node: kume yok -> <=max conservative
-		}
 		if maxSubscribedQuality == livekit.VideoQuality_OFF || (nodeQuality != livekit.VideoQuality_OFF && nodeQuality > maxSubscribedQuality) {
 			maxSubscribedQuality = nodeQuality
 		}
 	}
 
-	// ESKİ: if maxSubscribedQuality == d.maxSubscribedQuality && d.initialized && !force {
-	// SpeakNow fork #6: kume degisimi de (max ayni kalsa bile, orn. izlenmeyen orta katman bosalinca) tetikler.
-	if maxSubscribedQuality == d.maxSubscribedQuality && subscribedQualities == d.subscribedQualities && d.initialized && !force {
+	if maxSubscribedQuality == d.maxSubscribedQuality && d.initialized && !force {
 		d.lock.Unlock()
 		return
 	}
 
 	d.initialized = true
 	d.maxSubscribedQuality = maxSubscribedQuality
-	d.subscribedQualities = subscribedQualities
 	d.params.Logger.Debugw(
 		"notifying quality change",
 		"mime", d.params.MimeType,
 		"maxSubscriberQuality", d.maxSubscriberQuality,
 		"maxSubscriberNodeQuality", d.maxSubscriberNodeQuality,
 		"maxSubscribedQuality", d.maxSubscribedQuality,
-		"subscribedQualities", d.subscribedQualities,
 		"force", force,
 	)
 	d.lock.Unlock()
 
-	// ESKİ: d.params.Listener.OnUpdateMaxQualityForMime(d.params.MimeType, maxSubscribedQuality)
-	d.params.Listener.OnUpdateMaxQualityForMime(d.params.MimeType, maxSubscribedQuality, subscribedQualities)
+	d.params.Listener.OnUpdateMaxQualityForMime(d.params.MimeType, maxSubscribedQuality)
 }
 
 func (d *dynacastQualityVideo) startMaxQualityTimer() {

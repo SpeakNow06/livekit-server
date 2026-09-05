@@ -35,6 +35,7 @@ import (
 
 	"github.com/livekit/livekit-server/pkg/sfu/audio"
 	"github.com/livekit/livekit-server/pkg/sfu/audiodenoise"
+	"github.com/livekit/livekit-server/pkg/sfu/rawrec"
 	"github.com/livekit/livekit-server/pkg/sfu/buffer"
 	"github.com/livekit/livekit-server/pkg/sfu/rtpstats"
 	"github.com/livekit/livekit-server/pkg/sfu/streamtracker"
@@ -229,6 +230,15 @@ type ReceiverBase struct {
 	forwardersWaitGroup  *sync.WaitGroup
 	restartInProgress    bool
 
+	// SPEAKNOW FORK (RAWREC): ham görüntü yazıcısı TRACK BAŞINA TEK.
+	// Eskiden katman başınaydı ve yalnız EN ÜST katmana kuruluyordu; o
+	// katman ders ortasında susunca (ölçüldü, kayıt 184: kamera 196 sn'nin
+	// 134'ünde) dosyaya hiçbir şey yazılmıyordu — alt katman akıyor olsa
+	// bile. Artık bütün katmanların forwarder'ı AYNI yazıcıya yazıyor ve
+	// yazıcı o an canlı olan EN ÜST katmanı takip ediyor.
+	rawVideo     *rawrec.VideoWriter
+	rawVideoOnce sync.Once
+
 	isClosed atomic.Bool
 }
 
@@ -274,6 +284,11 @@ func (r *ReceiverBase) Close(reason string, clearBuffers bool) {
 
 	if rt := r.loadREDTransformer(); rt != nil {
 		rt.Close()
+	}
+
+	// RAWREC: yazıcı track başına tek, ömrü de track'in ömrü.
+	if r.rawVideo != nil {
+		r.rawVideo.Close()
 	}
 
 	if r.params.OnClosed != nil {
@@ -940,6 +955,27 @@ func (r *ReceiverBase) startForwarderForBufferLocked(layer int32, buff buffer.Bu
 	go r.forwardRTP(layer, buff, forwarderGeneration, r.forwardersWaitGroup)
 }
 
+// rawrecÜstKatman — RAWREC görüntü yazıcısının bağlanacağı katman: EN YÜKSEK
+// kalite. Bugün bot tarayıcısı SFU'nun kendisine ilettiği katmanı yazıyor ve
+// tıkanıklıkta katman değişince damgalar geri gidebiliyor (ölçüldü, kayıt 114:
+// 1079 karede 7 kez). Tek katmana sabitlemek o sınıf bozulmayı kaldırıyor.
+//
+// SVC'de (tek uptrack, spatial paketin içinde) katman hep 0.
+func (r *ReceiverBase) rawrecÜstKatman() int32 {
+	if r.videoLayerMode == livekit.VideoLayer_MULTIPLE_SPATIAL_LAYERS_PER_STREAM {
+		return 0
+	}
+	l := buffer.GetSpatialLayerForVideoQuality(
+		mime.NormalizeMimeType(r.params.Codec.MimeType),
+		livekit.VideoQuality_HIGH,
+		r.trackInfo,
+	)
+	if l < 0 {
+		return 0
+	}
+	return l
+}
+
 func (r *ReceiverBase) forwardRTP(
 	layer int32,
 	buff buffer.BufferProvider,
@@ -997,6 +1033,47 @@ func (r *ReceiverBase) forwardRTP(
 		}
 	}
 
+	// SPEAKNOW FORK (RAWREC — Aşama 1): ham sesi SFU'nun İÇİNDE diske yaz.
+	// Bugün bu iş botun tarayıcısında yapılıyor ve oradaki kanca jitter
+	// tamponunun önünde olduğu için dosyanın ders eksenindeki yeri TAHMİN
+	// edilmek zorunda kalıyor. Burada Sender Report aynı süreçte, yani çapa
+	// hesap değil veri. `SN_RAWREC=1` yoksa kod yoluna hiç girilmez.
+	// Plan: monopol/docs/split-recording/SFU-HAM-YAKALAMA-PLANI.md
+	var rawWriter *rawrec.Writer
+	if layer == 0 && mime.IsMimeTypeStringAudio(r.params.Codec.MimeType) &&
+		rawrec.Enabled() {
+		rawWriter = rawrec.NewWriter(
+			r.params.TrackID, r.trackInfo, r.params.Codec.ClockRate,
+			r.isRED, buff, r.params.Logger)
+		if rawWriter != nil {
+			defer rawWriter.Close()
+		}
+	}
+
+	// SPEAKNOW FORK (RAWREC — Aşama 2): ham GÖRÜNTÜ, aynı gerekçeyle.
+	//
+	// ⚠ YAZICI TRACK BAŞINA TEK, KATMAN BAŞINA DEĞİL (2026-09-04).
+	// Eski sürüm yalnız `rawrecÜstKatman()` katmanına yazıcı kuruyordu.
+	// O katman ders ortasında susunca dosyaya hiçbir şey yazılmıyordu —
+	// alt katman akmaya devam ediyor olsa bile. Ölçüldü (kayıt 184):
+	// kameranın üst katmanı, ekran paylaşımı yayındayken 196 saniyenin
+	// 134'ünde öldü; kayda o süre boyunca kamera girmedi.
+	// Artık BÜTÜN katmanların forwarder'ı aynı yazıcıya yazıyor; yazıcı
+	// o an canlı olan en üst katmanı seçiyor (bkz. rawrec/video.go).
+	var rawVideo *rawrec.VideoWriter
+	if mime.IsMimeTypeStringVideo(r.params.Codec.MimeType) && rawrec.Enabled() {
+		r.rawVideoOnce.Do(func() {
+			r.rawVideo = rawrec.NewVideoWriter(
+				r.params.TrackID, r.trackInfo, r.params.Codec.ClockRate,
+				mime.NormalizeMimeType(r.params.Codec.MimeType),
+				buff, r.rawrecÜstKatman(), r.params.Logger)
+		})
+		rawVideo = r.rawVideo
+		// Her katman kendi kaynağını bildiriyor: yazıcı o katmana geçince
+		// PLI'yı ve Sender Report'u DOĞRU katmandan alsın.
+		rawVideo.KatmanKaydet(layer, buff)
+	}
+
 	pktBuf := make([]byte, bucket.RTPMaxPktSize)
 	r.params.Logger.Debugw(
 		"starting forwarding",
@@ -1015,6 +1092,16 @@ func (r *ReceiverBase) forwardRTP(
 		}
 		dequeuedAt := mono.UnixNano()
 
+		// RAWREC: paketi ham dosyaya kopyala. Bloklamaz, hata yutar; akış
+		// bundan etkilenmez. Örnek sayısı bir sonraki paketin damgasından
+		// türetilemediği için Opus'un standart 20 ms'si (960 örnek @48 kHz)
+		// veriliyor — bugünkü tarayıcı yolunun varsayılanının aynısı, ve
+		// ölçüldü ki bu akışlarda config 13/15/31'in üçü de 20 ms.
+		if rawWriter != nil {
+			rawWriter.Write(extPkt.Packet.Payload, extPkt.Packet.Timestamp, 960,
+				extPkt.Packet.SequenceNumber)
+		}
+
 		if extPkt.Packet.PayloadType != uint8(r.params.Codec.PayloadType) {
 			// drop packets as we don't support codec fallback directly
 			r.params.Logger.Debugw(
@@ -1024,6 +1111,15 @@ func (r *ReceiverBase) forwardRTP(
 			)
 			numPacketsDropped++
 			continue
+		}
+
+		// RAWREC (görüntü): kareyi ham dosyaya kopyala. SESTEN FARKLI OLARAK
+		// payload tipi kontrolünün ALTINDA: eşleşmeyen paket yanlış kodeğe
+		// ait ve kareyi bozar. Bloklamaz, hata yutar; akış etkilenmez.
+		if rawVideo != nil {
+			rawVideo.Write(extPkt.Packet.Payload, extPkt.Packet.Timestamp,
+				extPkt.Packet.Marker, extPkt.IsKeyFrame,
+				extPkt.Packet.SequenceNumber, layer)
 		}
 
 		spatialLayer := layer
