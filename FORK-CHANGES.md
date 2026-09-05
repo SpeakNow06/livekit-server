@@ -979,7 +979,25 @@ karşılaştırılmasını gerektiriyor, SFU'da ses ve video ayrı yazıcılar).
 Yan JSON'a eklenenler: `capa_kaynak: "sfu-sr-fit"`, `capa_ornek`,
 `capa_artik_ms`, `capa_kayma_ppm`.
 
-**Image:** `ghcr.io/speaknow06/livekit-server:v1.11.0-rawrec31` (demo'da canlı).
+### 22. `rawrec/video.go` — artan damga korumasi 1 tik yerine 1 ms (2026-09-05)
+
+`pts = sonPTS + 1` → `sonPTS + clockRate/1000`.
+
+⚠ **Bu bir sorunu çözmüyor — teşhis yanlıştı.** Gerekçe kayıt 192'de sayılan
+6 adet "non monotonically increasing dts" uyarısıydı; sonradan (kayıt 202) o
+uyarıların DOSYADAN değil `ffmpeg -f null` TEST KOMUTUNDAN geldiği görüldü:
+`-f null` çözüp yeniden kodluyor ve sabit kare hızlı bir çıkış zaman tabanı
+dayatıyor, değişken kare hızlı kaynakta kareler aynı dts'e düşüyor.
+`-c copy` ile sıfır uyarı çıkıyor.
+
+Dosya zaten temiz: kayıt 202 kamerasında 3649 karenin en küçük aralığı
+1800 tık (20 ms), 1 ms'den yakın kare YOK, WebM'de duplikat pts YOK — yani
+koruma muhtemelen hiç tetiklenmiyor.
+
+Değişiklik yine de bırakıldı: koruma bir gün tetiklenirse milisaniye
+çözünürlüklü bir kapta 1 ms itmek 11 µs itmekten doğrudur.
+
+**Image:** `ghcr.io/speaknow06/livekit-server:v1.11.0-rawrec32` (demo'da canlı).
 
 ⚠ **Türev zinciri sıfırlandı.** rawrec19'dan beri her sürüm bir öncekinden
 `FROM` aldığı için eski binary'ler katmanlarda birikiyordu: 192 → 263 → 335 →
