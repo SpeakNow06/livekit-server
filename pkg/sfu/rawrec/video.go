@@ -754,10 +754,22 @@ func (w *VideoWriter) loop() {
 		pts := rel + bölümTaban
 		// ARTAN OLMAYAN DAMGA — IVF'te sıra dosya sırasıdır; geri giden damga
 		// muxer'ı bozuyor ("non monotonically increasing dts"). Kareyi
-		// ATMIYORUZ (görüntü kaybı olurdu), damgayı bir tık ileri alıyoruz.
-		// Tarayıcı yolundaki koruma ile aynı (app.py, `backwards`).
-		if pts <= sonPTS {
-			pts = sonPTS + 1
+		// ATMIYORUZ (görüntü kaybı olurdu), damgayı ileri alıyoruz.
+		//
+		// ⚠ BİR TIK DEĞİL, BİR MİLİSANİYE (2026-09-05). 90 kHz'de bir tık
+		// 11 MİKROsaniye; çıktı kabı WebM ise damgalar MİLİSANİYE
+		// çözünürlüğünde tutuluyor ve iki kare yine AYNI milisaniyeye
+		// yuvarlanıyordu — itme hiçbir işe yaramıyordu. Ölçüldü (kayıt 192):
+		// 480 karede 6 kez "non monotonically increasing dts" uyarısı, hepsi
+		// bu yüzden. Bir milisaniyelik itme kapta da ayrık kalıyor.
+		//
+		// Maliyeti yok: nadiren tetikleniyor (480 karede 6) ve her seferinde
+		// zaman çizgisini 1 ms ileri alıyor — 6 karede toplam 6 ms.
+		if enAzArtis := int64(w.clockRate / 1000); pts <= sonPTS {
+			if enAzArtis < 1 {
+				enAzArtis = 1
+			}
+			pts = sonPTS + enAzArtis
 		}
 		sonPTS = pts
 		sonGeliş = geliş
