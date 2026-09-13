@@ -1064,8 +1064,9 @@ dosyası varsa bütün tarayıcı kopyaları atılır — o SFU dosyası mobil
 - Replay testi altın değeri değişmedi (yan JSON hash'e girmiyor); iki katman
   testi `sid`/`cid` alanlarını doğruluyor.
 
-**Image:** `ghcr.io/speaknow06/livekit-server:v1.11.0-rawrec35` (2026-09-13,
-rawrec34'ün üstüne §25).
+**Image:** çalışan `ghcr.io/speaknow06/livekit-server:v1.11.0-rawrec35` (§25).
+`v1.11.0-rawrec36` (§26) 2026-09-13 22:02'de derlendi + ghcr'a push edildi, DEPLOY
+BEKLİYOR (canlı ders): compose'da etiket + `SN_RAWREC_WAIT=60` → `10`.
 
 ## 25. rawrec: KAYIT ÖNCESİ paketler dosyaya girmez (2026-09-13, kayıt 882)
 
@@ -1097,6 +1098,48 @@ paketler atıldı` (atilan/tutulan/kesim).
 407 → 479 → **550 MB** (rawrec24). rawrec25 son TAM build olan **rawrec18
 (192 MB)** tabanından yapıldı → **263 MB**. Bundan sonraki türevler de
 rawrec18'den alınmalı; prod'da yine de TAM build yapılacak.
+
+## 26. rawrec: hedef öncesi KAYAN tampon, "eksik" yalnız gerçek kayıpta (2026-09-13, kayıt 883)
+
+**Sorun:** yazıcı hedefi (kayıt anahtarını) beklerken 60 sn (`SN_RAWREC_WAIT`)
+biriktiriyor, süre dolunca tamponu TÜMDEN atıp dosyayı `tampon_dusuruldu` →
+`durum: eksik` damgalıyordu. Kayıt 883'te öğretmenin dört track'i kayıttan ~2 dk
+önce yayınlandı; dört yazıcı da 60. sn'de (kayıttan ~60 sn ÖNCE) tamponu attı,
+hedefi kayıt anında buldu ve dosyaları kaydın başından itibaren TAM yazdı (SFU
+çapaları 18:22:15.0–16.3, kayıt 18:22:14.95) — ama yan JSON "eksik" dediği için
+postprocess (`_sfu_kullanilabilir` yalnız `tam` kabul ediyor) dördünü de tarayıcı
+kopyasına düşürdü (`kaynak_uyari`) ve o kopyalar 10 sn kaydı (speaknow-server
+HANDOFF: tarayıcı kopyasının başındaki anahtar karesiz 10 sn + `_ivf_onar`).
+Bekleme süresi tek başına arıza değildi; 60'ın gerekçesi (kayıt 169'da DB
+satırının 17 sn geç yazılması) da oda anahtarının satır oluşur oluşmaz
+`baslangic_ms` ile yazılmasıyla (§25) ortadan kalkmıştı.
+
+**Kullanıcı kararı:** "60 saniyeyi 10'a düşür; kayıt düğmesine bastığım andan
+itibaren yazsın (§25 kesimi aynen); eksik yalnız gerçekten kayıp varsa."
+
+**Çözüm (`tampon.go` yeni; rawrec.go / video.go / saglik.go):**
+- Tampon KAYAN PENCERE: hedef bulunana kadar yalnız son `SN_RAWREC_WAIT`
+  (varsayılan artık **10 sn**) tutulur, eskisi paket geldikçe atılır
+  (`pencereKirp`); görüntüde ek olarak `videoBekleyenÜstSınır` sayı freni
+  (`ustSinirKirp`). Arama track boyunca sürer (§ kayıt 177 kuralı), tampon hiç
+  bırakılmaz; bellek sabit (ses ~45 KB, görüntü ≤ ~12 MB).
+- Hedef bulununca §25 kesimi (başlangıç − 2 sn) aynen; ardından
+  `saglik.kayanTamponSonucu`: pencereden taşan EN YENİ paket kayıt
+  başlangıcından SONRA geldiyse `kayit_basi_kayip_sn` → "eksik" ("kayıt
+  başındaki X sn tampon penceresine sığmadı: anahtar geç bulundu"); yalnız
+  kayıt öncesi taştıysa "tam". Eski anahtar (başlangıç yok) → "tam".
+- `waitFor` dolunca yalnız yoklama seyreltilir (`geçAramaAralığı` 2 sn) ve
+  Redis'e "hedef-yok" notu düşer (INFO log `rawrec hedef henüz yok, kayan
+  tampon sürüyor`); hedef sonradan bulununca not SİLİNİR (`geriDususSil`) —
+  883'te `kaynak_uyari` bu bayat notla "SFU kayıt anahtarını bulamadı" demişti.
+- Yan JSON: `tampon_dusuruldu` KALKTI; `tampon_penceresi_sn`, varsa
+  `tampon_atilan_paket` ve `kayit_basi_kayip_sn`. Postprocess bu alanları
+  okumuyor (yalnız `durum`/`neden`/`kare_atilan`), değişiklik gerekmedi.
+- `hedef bulundu` logu `bekleyen_paket` / `pencereden_atilan` taşıyor.
+
+Test: `tampon_test.go` (pencere/üst sınır kırpma; "eksik" yalnız kayıt içi
+taşmada). Prod compose: `SN_RAWREC_WAIT=60` → `10` (etiketle birlikte
+değiştirilecek; ortam değişkeni varsayılanı EZER).
 
 ## Rebuild
 ```bash
