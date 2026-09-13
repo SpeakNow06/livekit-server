@@ -1,6 +1,7 @@
 package rawrec
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/livekit/protocol/livekit"
@@ -110,7 +111,15 @@ type saglik struct {
 	// sonPaket ilerlemeye devam ediyor, yazılan kalıyor.
 	sonPaket time.Time
 
-	tamponDurdu       bool          // hedef geç bulundu, bekleyen paketler atıldı
+	// ── HEDEF ÖNCESİ KAYAN TAMPON (2026-09-13, kayıt 883 — rawrec36) ───
+	// Eski `tamponDurdu` ("60 sn doldu, hepsi atıldı → eksik") kalktı:
+	// bekleme süresi tek başına arıza değil. Ölçü artık "pencereden taşan
+	// paket KAYDIN İÇİNDEN miydi": `kayitBasiKayip` > 0 ise dosya kaydın
+	// başını kaçırmıştır → "eksik"; yalnız kayıt öncesi taştıysa "tam".
+	// Gerekçe ve ölçüm: tampon.go.
+	pencere           time.Duration // kayan tamponun genişliği (`waitFor`)
+	tamponAtilan      int           // hedef bulunmadan pencereden taşıp atılan paket
+	kayitBasiKayip    time.Duration // kayıt başlangıcı ile atılan en yeni paket arası (>0 → eksik)
 	kayitOncesiAtilan time.Duration // kayıt başlangıcından önceki, atılan tampon süresi
 	ilkSeq            uint16        // ilk RTP sıra numarası
 	sonSeq            uint16
@@ -175,6 +184,22 @@ func (s *saglik) kesimUygulandi(kesim time.Time) {
 		s.kayitOncesiAtilan = kesim.Sub(s.baslangic)
 		s.baslangic = kesim
 	}
+}
+
+// kayanTamponSonucu — hedef bulundu: pencereden taşan paketler kaydın içinden
+// miydi? `baslangic` kayıt düğmesinin anı; anahtar taşımıyorsa sıfır (eski
+// anahtar: karar verilemez, "tam" kalır — dosya en çok `pencere` kadar erken
+// başlar, kayıp yok).
+func (s *saglik) kayanTamponSonucu(pencere time.Duration, iz tamponIzi,
+	baslangic time.Time) {
+	if s == nil {
+		return
+	}
+	s.pencere, s.tamponAtilan = pencere, iz.atilan
+	if iz.atilan == 0 || baslangic.IsZero() || iz.atilanSon.Before(baslangic) {
+		return
+	}
+	s.kayitBasiKayip = iz.atilanSon.Sub(baslangic)
 }
 
 func (s *saglik) katmanDegisti() {
@@ -251,8 +276,10 @@ func (s *saglik) rapor() map[string]any {
 
 	durum, neden := "tam", ""
 	switch {
-	case s.tamponDurdu:
-		durum, neden = "eksik", "hedef geç bulundu, bekleyen paketler atıldı"
+	case s.kayitBasiKayip > 0:
+		durum, neden = "eksik", fmt.Sprintf("kayıt başındaki %.1f sn tampon "+
+			"penceresine (%s) sığmadı: anahtar geç bulundu",
+			s.kayitBasiKayip.Seconds(), s.pencere)
 	case s.ilkKare.IsZero():
 		durum, neden = "eksik", "dosyaya hiç kare yazılmadı"
 	case bagli > 1 && yazilan < bagli*saglikEsigi:
@@ -265,14 +292,14 @@ func (s *saglik) rapor() map[string]any {
 	}
 
 	r := map[string]any{
-		"durum":              durum,
-		"neden":              neden,
-		"bagli_sn":           yuvarla(bagli),
-		"yazilan_sn":         yuvarla(yazilan),
-		"en_buyuk_bosluk_sn": yuvarla(s.enBuyukAra.Seconds()),
-		"tampon_dusuruldu":   s.tamponDurdu,
-		"paket_beklenen":     beklenen,
-		"paket_kayip":        kayip,
+		"durum":               durum,
+		"neden":               neden,
+		"bagli_sn":            yuvarla(bagli),
+		"yazilan_sn":          yuvarla(yazilan),
+		"en_buyuk_bosluk_sn":  yuvarla(s.enBuyukAra.Seconds()),
+		"tampon_penceresi_sn": yuvarla(s.pencere.Seconds()),
+		"paket_beklenen":      beklenen,
+		"paket_kayip":         kayip,
 	}
 	// Seste de yazılıyor ama orada `kare_atilan` daima 0: bir Opus paketi
 	// zaten bir kare, parçalanma yok, dolayısıyla bütünlük sorunu da yok.
@@ -286,6 +313,12 @@ func (s *saglik) rapor() map[string]any {
 	}
 	if s.kayitOncesiAtilan > 0 {
 		r["kayit_oncesi_atilan_sn"] = yuvarla(s.kayitOncesiAtilan.Seconds())
+	}
+	if s.tamponAtilan > 0 {
+		r["tampon_atilan_paket"] = s.tamponAtilan
+	}
+	if s.kayitBasiKayip > 0 {
+		r["kayit_basi_kayip_sn"] = yuvarla(s.kayitBasiKayip.Seconds())
 	}
 	if s.siraBosluk > 0 {
 		r["sira_boslugu"] = s.siraBosluk

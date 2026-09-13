@@ -91,8 +91,10 @@ const chanBuf = 2048
 // Kontrol anahtarı yoklama aralığı. İlk paketten sonra bu sıklıkta bakılıyor.
 const lookupEvery = 300 * time.Millisecond
 
-// geçAramaAralığı — tampon bırakıldıktan SONRAKİ yoklama sıklığı. Artık acele
-// yok (kaçırılan kısım zaten kaçtı), Redis'i boşuna yormayalım.
+// geçAramaAralığı — `waitFor` dolduktan SONRAKİ yoklama sıklığı. Anahtar bu
+// kadar gecikmişse acele yok: kayan tampon son `waitFor`ı zaten tutuyor ve
+// 2 sn'lik yoklama gecikmesi ön payın (`onRol`) + pencerenin içinde kalıyor.
+// Redis'i boşuna yormayalım.
 const geçAramaAralığı = 2 * time.Second
 
 var (
@@ -170,11 +172,22 @@ func initOnce() {
 		DB:       envInt("SN_RAWREC_REDIS_DB", 0),
 		Password: os.Getenv("SN_RAWREC_REDIS_PASSWORD"),
 	})
-	// 60 sn — 10 DEĞİL. Ölçüldü (kayıt 169): track 00:23:26'da yayınlandı ama
-	// kayıt satırı DB'ye 00:23:43'te yazıldı (17 sn sonra); webhook o ana
-	// kadar "kayıt satırı yok" deyip anahtarı yazamıyor. 10 sn'lik bekleme
-	// dolup vazgeçiyorduk. Bellek bedeli: 60 sn × 50 paket/sn × ~90 B ≈ 270 KB.
-	waitFor = time.Duration(envInt("SN_RAWREC_WAIT", 60)) * time.Second
+	// KAYAN TAMPON PENCERESİ (2026-09-13, kayıt 883 — rawrec36, bkz. tampon.go).
+	// Hedef bulunana kadar YALNIZ son bu kadar saniyenin paketleri tutulur;
+	// eskisi paket geldikçe atılır. Eskiden 60 sn BİRİKTİRİLİP dolunca HEPSİ
+	// atılıyor ve dosya "eksik" damgalanıyordu; kayıt 883'te track'ler
+	// kayıttan 2 dk önce yayınlandığı için dört yazıcı da "eksik" dedi,
+	// postprocess tarayıcı kopyasına düştü ve ses/görüntü 10 sn kaydı — oysa
+	// dosyalar kaydın başından itibaren tamdı.
+	//
+	// 60'ın gerekçesi de kalmadı: kayıt 169'daki 17 sn'lik "DB satırı geç
+	// yazıldı" gecikmesi, oda anahtarının satır oluşur oluşmaz (robot
+	// girmeden, `baslangic_ms` ile) yazılmasıyla kapandı; yazıcı 300 ms'de
+	// bir bakıyor, anahtar tipik olarak 1 sn içinde görülüyor. 10 sn bunun
+	// onlarca katı; ön pay (`onRol`, 2 sn) da pencerenin içinde.
+	// Bellek: ses 10 sn × 50 paket × ~90 B ≈ 45 KB; görüntüde ayrıca
+	// `videoBekleyenÜstSınır` freni var.
+	waitFor = time.Duration(envInt("SN_RAWREC_WAIT", 10)) * time.Second
 	// Kayıt başlangıcından bu kadar öncesi tutulur (anahtar birkaç yüz ms geç
 	// görülebiliyor; görüntüde zaten ilk anahtar kareden başlanıyor).
 	onRol = time.Duration(envInt("SN_RAWREC_ONROL_SN", 2)) * time.Second
@@ -184,7 +197,7 @@ func initOnce() {
 	kfEnÇokSn = time.Duration(envInt("SN_RAWREC_KEYFRAME_MAX_SN", 30)) * time.Second
 	enabled = true
 	logger.Infow("rawrec açık", "redis", envOr("SN_RAWREC_REDIS", "localhost:6379"),
-		"bekleme", waitFor, "üst_katman_sabitle", pinHigh,
+		"tampon_penceresi", waitFor, "üst_katman_sabitle", pinHigh,
 		"anahtar_kare_en_çok_kare", kfEnÇokKare,
 		"anahtar_kare_en_az", kfEnAzSn, "anahtar_kare_en_çok", kfEnÇokSn)
 }
@@ -244,6 +257,14 @@ func (h *hedef) kesim() time.Time {
 		return time.Time{}
 	}
 	return time.UnixMilli(h.BaslangicMs).Add(-onRol)
+}
+
+// baslangic — kayıt düğmesine basıldığı an (anahtar taşıyorsa), yoksa sıfır.
+func (h *hedef) baslangic() time.Time {
+	if h == nil || h.BaslangicMs <= 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(h.BaslangicMs)
 }
 
 // trackEşleme — track anahtarının içeriği (webhook yazıyor).
@@ -415,19 +436,22 @@ func (w *Writer) loop() {
 	defer close(w.done)
 
 	var (
-		h           *hedef
-		bekleyen    []paket
-		ogg         *oggYazıcı
-		fh          *os.File
-		yol         string
-		ilkRTP      uint32
-		ilkAn       time.Time // dosyadaki İLK paketin anı → yan JSON
-		ilkPaketAn  time.Time // track'in ilk paketi → bekleme zaman aşımı
-		sonRel      uint32
-		kare        int
-		yazılan     uint64
-		vazgeç      bool // yalnız ONARILAMAZ hata (dosya açılamadı) için
-		tamponDurdu bool
+		h          *hedef
+		bekleyen   []paket
+		ogg        *oggYazıcı
+		fh         *os.File
+		yol        string
+		ilkRTP     uint32
+		ilkAn      time.Time // dosyadaki İLK paketin anı → yan JSON
+		ilkPaketAn time.Time // track'in ilk paketi → bekleme zaman aşımı
+		sonRel     uint32
+		kare       int
+		yazılan    uint64
+		vazgeç     bool // yalnız ONARILAMAZ hata (dosya açılamadı) için
+		// Hedef öncesi kayan tamponun izi (bkz. tampon.go): kaç paket
+		// pencereden taştı, en yenisi ne zaman geldi.
+		iz              tamponIzi
+		pencereUyarildi bool // `waitFor` doldu: yoklama seyreltildi, Redis'e "hedef-yok" düştü
 
 		// ── SR'yi AKIŞ SÜRERKEN topla (2026-08-31) ────────────────────────
 		// İlk sürüm `GetSenderReportData()`yı dosya KAPANIRKEN okuyordu ve
@@ -480,31 +504,37 @@ func (w *Writer) loop() {
 			}
 			h = w.hedefAra()
 			if h == nil {
-				// ⚠ KALICI VAZGEÇME YOK (2026-09-03, kayıt 177).
-				// Eski sürüm `waitFor` dolunca bir daha bakmıyordu. O derste
-				// anahtar 77 saniye sonra yazıldı ve yazıcı çoktan pes
-				// etmişti — birinci paylaşım hiç kaydedilmedi. Artık yalnız
-				// TAMPON duruyor (bellek için); arama track boyunca sürüyor
-				// ve anahtar geç gelirse kaydın KALANI kurtarılıyor.
-				if !tamponDurdu && time.Since(ilkPaketAn) > waitFor {
-					w.log.Warnw("rawrec hedef hâlâ yok, tampon bırakıldı "+
-						"(arama sürüyor)", nil, "track", w.trackID, "sid", w.sid,
-						"bekleme", waitFor, "bırakılan_paket", len(bekleyen),
+				// ⚠ KALICI VAZGEÇME YOK (2026-09-03, kayıt 177): eski sürüm
+				// `waitFor` dolunca bir daha bakmıyordu, o derste anahtar 77
+				// saniye sonra yazıldı ve birinci paylaşım hiç kaydedilmedi.
+				// Arama track boyunca sürüyor.
+				// ⚠ TAMPON DA BIRAKILMIYOR (2026-09-13, kayıt 883 — rawrec36):
+				// tampon zaten kayan pencere (bkz. tampon.go). `waitFor`
+				// dolunca yalnız yoklama seyreltiliyor ve Redis'e "hedef-yok"
+				// notu düşüyor (hedef sonradan bulunursa siliniyor). Eskiden
+				// burada tampon atılıp dosya "eksik" damgalanıyordu — gerekçe
+				// `waitFor` başlığında.
+				if !pencereUyarildi && time.Since(ilkPaketAn) > waitFor {
+					pencereUyarildi = true
+					w.log.Infow("rawrec hedef henüz yok, kayan tampon sürüyor",
+						"track", w.trackID, "sid", w.sid,
+						"pencere", waitFor, "bekleyen_paket", len(bekleyen),
 						"kaynak", kaynakAdı(w.trackInfo))
-					tamponDurdu = true
-					sagl.tamponDurdu = true
-					bekleyen = nil
 					tik.Reset(geçAramaAralığı)
 					geriDususYaz(w.sid, geriDusus{Neden: "hedef-yok",
 						Kaynak: kaynakAdı(w.trackInfo), Track: string(w.trackID),
 						Ayrinti: fmt.Sprintf("%s içinde kayıt anahtarı bulunamadı, "+
-							"arama sürüyor", waitFor)}, w.log)
+							"arama sürüyor (son %s tamponda)", waitFor, waitFor)}, w.log)
 				}
 				continue
 			}
 			w.log.Infow("rawrec hedef bulundu", "track", w.trackID,
 				"kayit", h.RecordingID, "dizin", h.Dir,
-				"gecikme", time.Since(ilkPaketAn).Round(time.Millisecond))
+				"gecikme", time.Since(ilkPaketAn).Round(time.Millisecond),
+				"bekleyen_paket", len(bekleyen), "pencereden_atilan", iz.atilan)
+			if pencereUyarildi {
+				geriDususSil(w.sid, w.log) // "hedef-yok" notu artık yanlış
+			}
 			tik.Stop()
 
 		case p, ok := <-w.ch:
@@ -527,16 +557,17 @@ func (w *Writer) loop() {
 					w.log.Infow("rawrec ilk paket geldi, hedef aranıyor",
 						"track", w.trackID, "sid", w.sid)
 				}
-				if !tamponDurdu {
-					bekleyen = append(bekleyen, p)
-				}
+				// KAYAN PENCERE: yalnız son `waitFor` tutulur (tampon.go).
+				bekleyen = pencereKirp(append(bekleyen, p), paketAn, p.geliş,
+					waitFor, &iz)
 				continue
 			}
 
 			// ── 2. Hedef var ama dosya henüz açılmadı ───────────────────
 			if fh == nil {
-				// Tampon bırakılmışsa elde bekleyen kalmadı; dosya bu
-				// paketten başlıyor. Çapa da ona göre kuruluyor.
+				// Elde en çok son `waitFor`ın paketleri var (kayan tampon);
+				// dosya kesimden sonraki ilk paketten başlıyor, çapa da ona
+				// göre kuruluyor.
 				bekleyen = append(bekleyen, p)
 				// KAYIT ÖNCESİNİ ATMA (bkz. hedef.kesim): başlangıçtan önceki
 				// paketler dosyaya girmez. Sağlık tabanı da kesime çekilir ki
@@ -560,6 +591,8 @@ func (w *Writer) loop() {
 					bekleyen = tutulan
 					sagl.kesimUygulandi(kesim)
 				}
+				// Pencereden taşan paket KAYDA ait miydi? (bkz. tampon.go)
+				sagl.kayanTamponSonucu(waitFor, iz, h.baslangic())
 				ilkRTP = bekleyen[0].rtp
 				ilkAn = bekleyen[0].geliş
 				var err error
@@ -726,9 +759,9 @@ const fallbackPrefix = "sn:rawrec:fallback:"
 const fallbackTTL = 12 * time.Hour
 
 // geriDusus — Redis'e düşen kaydın içeriği. `Neden` üç değerden biri:
-// "kodek" (yazıcı hiç kurulmadı), "hedef-yok" (kayıt anahtarı bekleme
-// süresinde bulunamadı; arama sürüyor, sonradan bulunursa dosya yine
-// yazılır), "dosya-acilamadi" (onarılamaz disk hatası).
+// "kodek" (yazıcı hiç kurulmadı), "hedef-yok" (kayıt anahtarı `waitFor`
+// içinde bulunamadı; arama sürüyor, sonradan bulunursa dosya yine yazılır ve
+// bu not SİLİNİR — `geriDususSil`), "dosya-acilamadi" (onarılamaz disk hatası).
 type geriDusus struct {
 	Neden   string `json:"neden"`
 	Mime    string `json:"mime,omitempty"`
@@ -755,6 +788,22 @@ func geriDususYaz(sid string, g geriDusus, log logger.Logger) {
 		if err := rdb.Set(ctx, fallbackPrefix+sid, b, fallbackTTL).Err(); err != nil {
 			log.Warnw("rawrec geri düşüş kaydı Redis'e yazılamadı", err,
 				"sid", sid, "neden", g.Neden)
+		}
+	}()
+}
+
+// geriDususSil — hedef SONRADAN bulundu: `waitFor` dolunca düşülen "hedef-yok"
+// notu artık yanlış, postprocess'i yanıltmasın. Kayıt 883'te `kaynak_uyari`
+// bu bayat notla "SFU kayıt anahtarını bulamadı" dedi; dosya tamdı.
+func geriDususSil(sid string, log logger.Logger) {
+	if rdb == nil || sid == "" {
+		return
+	}
+	go func() {
+		ctx, iptal := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer iptal()
+		if err := rdb.Del(ctx, fallbackPrefix+sid).Err(); err != nil {
+			log.Warnw("rawrec geri düşüş notu silinemedi", err, "sid", sid)
 		}
 	}()
 }

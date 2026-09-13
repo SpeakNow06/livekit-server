@@ -401,18 +401,20 @@ func (w *VideoWriter) loop() {
 	defer close(w.done)
 
 	var (
-		h           *hedef
-		bekleyen    []vpaket
-		kap         kapYazici // kodeğin kabı (IVF / TS), bkz. kodek.go
-		fh          *os.File
-		yol         string
-		ilkRTP      uint32
-		ilkAn       time.Time // ilk YAZILAN karenin anı → yan JSON
-		ilkPaketAn  time.Time // ilk paketin anı → hedef bekleme zaman aşımı
-		sonPTS      int64     = -1
-		kare        int
-		vazgeç      bool // yalnız ONARILAMAZ hata (dosya açılamadı) için
-		tamponDurdu bool
+		h          *hedef
+		bekleyen   []vpaket
+		kap        kapYazici // kodeğin kabı (IVF / TS), bkz. kodek.go
+		fh         *os.File
+		yol        string
+		ilkRTP     uint32
+		ilkAn      time.Time // ilk YAZILAN karenin anı → yan JSON
+		ilkPaketAn time.Time // ilk paketin anı → hedef bekleme zaman aşımı
+		sonPTS     int64     = -1
+		kare       int
+		vazgeç     bool // yalnız ONARILAMAZ hata (dosya açılamadı) için
+		// Hedef öncesi kayan tamponun izi (bkz. tampon.go).
+		iz              tamponIzi
+		pencereUyarildi bool // `waitFor` doldu: yoklama seyreltildi, Redis'e "hedef-yok" düştü
 
 		// Kare toplama durumu.
 		parça        []byte
@@ -1073,29 +1075,32 @@ func (w *VideoWriter) loop() {
 			}
 			h = hedefAra(w.sid, w.log)
 			if h == nil {
-				// ⚠ KALICI VAZGEÇME YOK — gerekçe rawrec.go'da (kayıt 177).
-				if !tamponDurdu && time.Since(ilkPaketAn) > waitFor {
-					// UYARI seviyesi + Redis kaydı (Aşama 0): 870-872'de kamera
-					// tam bu yoldan sessizce tarayıcı yedeğine düşmüştü.
-					w.log.Warnw("rawrec görüntü hedef hâlâ yok, tampon "+
-						"bırakıldı (arama sürüyor)", nil, "track", w.trackID,
-						"sid", w.sid, "bekleme", waitFor,
-						"bırakılan_paket", len(bekleyen),
+				// ⚠ KALICI VAZGEÇME YOK (kayıt 177) ve TAMPON BIRAKILMIYOR
+				// (kayıt 883, rawrec36) — gerekçe rawrec.go `waitFor` ve
+				// tampon.go. Redis notu (Aşama 0): 870-872'de kamera tam bu
+				// yoldan sessizce tarayıcı yedeğine düşmüştü; hedef sonradan
+				// bulunursa not siliniyor.
+				if !pencereUyarildi && time.Since(ilkPaketAn) > waitFor {
+					pencereUyarildi = true
+					w.log.Infow("rawrec görüntü hedef henüz yok, kayan tampon sürüyor",
+						"track", w.trackID, "sid", w.sid, "pencere", waitFor,
+						"bekleyen_paket", len(bekleyen),
 						"kaynak", kaynakAdı(w.trackInfo))
-					tamponDurdu = true
-					sagl.tamponDurdu = true
-					bekleyen = nil
 					tik.Reset(geçAramaAralığı)
 					geriDususYaz(w.sid, geriDusus{Neden: "hedef-yok",
 						Kaynak: kaynakAdı(w.trackInfo), Track: string(w.trackID),
 						Ayrinti: fmt.Sprintf("%s içinde kayıt anahtarı bulunamadı, "+
-							"arama sürüyor", waitFor)}, w.log)
+							"arama sürüyor (son %s tamponda)", waitFor, waitFor)}, w.log)
 				}
 				continue
 			}
 			w.log.Infow("rawrec görüntü hedef bulundu", "track", w.trackID,
 				"kayit", h.RecordingID, "dizin", h.Dir,
-				"gecikme", time.Since(ilkPaketAn).Round(time.Millisecond))
+				"gecikme", time.Since(ilkPaketAn).Round(time.Millisecond),
+				"bekleyen_paket", len(bekleyen), "pencereden_atilan", iz.atilan)
+			if pencereUyarildi {
+				geriDususSil(w.sid, w.log) // "hedef-yok" notu artık yanlış
+			}
 			// ⚠ TICKER DURMUYOR — DÜZENLİ ANAHTAR KAREYE geçiyor.
 			// Eskiden burada `tik.Stop()` vardı; ilk anahtar kareden sonra
 			// bir daha PLI istenmiyordu ve dosyada anahtar kare yalnız
@@ -1140,6 +1145,8 @@ func (w *VideoWriter) loop() {
 				kuyruk = tutulan
 				sagl.kesimUygulandi(kesim)
 			}
+			// Pencereden taşan paket KAYDA ait miydi? (bkz. tampon.go)
+			sagl.kayanTamponSonucu(waitFor, iz, h.baslangic())
 			for _, b := range kuyruk {
 				if b.katman != suAnkiKatman {
 					continue // katman değişmişse eski paketler atılır
@@ -1214,16 +1221,13 @@ func (w *VideoWriter) loop() {
 					w.log.Infow("rawrec görüntü ilk paket geldi, hedef aranıyor",
 						"track", w.trackID, "sid", w.sid)
 				}
-				if !tamponDurdu {
-					bekleyen = append(bekleyen, p)
-					// Bellek freni: görüntüde saniyede ~2 Mbit akıyor, ses
-					// gibi 60 saniye biriktirilemez. Üst sınırı koyup en
-					// eskiyi atıyoruz — nasıl olsa dosya ilk ANAHTAR
-					// KAREDEN başlayacak.
-					if len(bekleyen) > videoBekleyenÜstSınır {
-						bekleyen = bekleyen[len(bekleyen)-videoBekleyenÜstSınır:]
-					}
-				}
+				// KAYAN PENCERE (son `waitFor`, tampon.go) + bellek freni:
+				// görüntüde saniyede ~2 Mbit akıyor, hareketli içerikte 10 sn
+				// bile `videoBekleyenÜstSınır`ı aşabilir; en eski atılıyor —
+				// nasıl olsa dosya ilk ANAHTAR KAREDEN başlayacak.
+				bekleyen = pencereKirp(append(bekleyen, p), vpaketAn, p.geliş,
+					waitFor, &iz)
+				bekleyen = ustSinirKirp(bekleyen, vpaketAn, videoBekleyenÜstSınır, &iz)
 				continue
 			}
 
