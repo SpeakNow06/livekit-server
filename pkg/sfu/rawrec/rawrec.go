@@ -464,13 +464,18 @@ func (w *Writer) loop() {
 				// TAMPON duruyor (bellek için); arama track boyunca sürüyor
 				// ve anahtar geç gelirse kaydın KALANI kurtarılıyor.
 				if !tamponDurdu && time.Since(ilkPaketAn) > waitFor {
-					w.log.Infow("rawrec hedef hâlâ yok, tampon bırakıldı "+
-						"(arama sürüyor)", "track", w.trackID, "sid", w.sid,
-						"bekleme", waitFor, "bırakılan_paket", len(bekleyen))
+					w.log.Warnw("rawrec hedef hâlâ yok, tampon bırakıldı "+
+						"(arama sürüyor)", nil, "track", w.trackID, "sid", w.sid,
+						"bekleme", waitFor, "bırakılan_paket", len(bekleyen),
+						"kaynak", kaynakAdı(w.trackInfo))
 					tamponDurdu = true
 					sagl.tamponDurdu = true
 					bekleyen = nil
 					tik.Reset(geçAramaAralığı)
+					geriDususYaz(w.sid, geriDusus{Neden: "hedef-yok",
+						Kaynak: kaynakAdı(w.trackInfo), Track: string(w.trackID),
+						Ayrinti: fmt.Sprintf("%s içinde kayıt anahtarı bulunamadı, "+
+							"arama sürüyor", waitFor)}, w.log)
 				}
 				continue
 			}
@@ -518,6 +523,9 @@ func (w *Writer) loop() {
 					w.birKezLogla("rawrec dosya açılamadı", err)
 					vazgeç = true
 					bekleyen = nil
+					geriDususYaz(w.sid, geriDusus{Neden: "dosya-acilamadi",
+						Kaynak: kaynakAdı(w.trackInfo), Track: string(w.trackID),
+						Ayrinti: err.Error()}, w.log)
 					continue
 				}
 				kanal := 1
@@ -644,6 +652,61 @@ func hedefAra(sid string, log logger.Logger) *hedef {
 		return nil
 	}
 	return &h
+}
+
+// ── GERİ DÜŞÜŞ KAYDI (Aşama 0, 2026-09-13) ─────────────────────────────────
+//
+// NEDEN VAR: SFU bir track'i yazmaktan vazgeçtiğinde (kodek tanınmıyor, kayıt
+// anahtarı bulunamadı, dosya açılamadı) tek iz konteyner logundaki bir
+// satırdı. Kayıt sessizce tarayıcı yedeğinden geliyor ve kimse fark
+// etmiyordu — ölçüldü: kayıt 876'da mobil öğrencinin H.264 paylaşımı,
+// 870-872'de öğretmen kamerası (webhook CAMERA anahtarı yazmamıştı) böyle
+// kaçtı; ikisi de ancak dosyalar elle incelenince görüldü.
+//
+// Artık vazgeçiş Redis'e düşüyor; postprocess kayıt bitince okuyup satıra
+// `kaynak_uyari` yazıyor ve admin panelinde rozet çıkıyor
+// (`recording_service/postprocess.py` → `_geri_dusus_raporla`).
+//
+//	anahtar  sn:rawrec:fallback:<track_sid>
+//	değer    {"neden":"kodek","mime":"video/H264","kaynak":"SCREEN_SHARE",…}
+//	ömür     12 saat — postprocess kayıt bitince okuyor, ders en çok birkaç saat
+//
+// Plan: docs/split-recording/SFU-KODEK-BAGIMSIZ-PLANI.md (Aşama 0)
+const fallbackPrefix = "sn:rawrec:fallback:"
+const fallbackTTL = 12 * time.Hour
+
+// geriDusus — Redis'e düşen kaydın içeriği. `Neden` üç değerden biri:
+// "kodek" (yazıcı hiç kurulmadı), "hedef-yok" (kayıt anahtarı bekleme
+// süresinde bulunamadı; arama sürüyor, sonradan bulunursa dosya yine
+// yazılır), "dosya-acilamadi" (onarılamaz disk hatası).
+type geriDusus struct {
+	Neden   string `json:"neden"`
+	Mime    string `json:"mime,omitempty"`
+	Kaynak  string `json:"kaynak"`
+	Track   string `json:"track"`
+	Ayrinti string `json:"ayrinti,omitempty"`
+	An      string `json:"an"`
+}
+
+// geriDususYaz — MEDYA YOLUNDAN ÇAĞRILABİLİR: kendi goroutine'inde çalışır,
+// bloklamaz; Redis yoksa yalnız loglar. Aynı track için son yazan kazanır.
+func geriDususYaz(sid string, g geriDusus, log logger.Logger) {
+	if rdb == nil || sid == "" {
+		return
+	}
+	g.An = time.Now().Format(time.RFC3339Nano)
+	go func() {
+		b, err := json.Marshal(g)
+		if err != nil {
+			return
+		}
+		ctx, iptal := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer iptal()
+		if err := rdb.Set(ctx, fallbackPrefix+sid, b, fallbackTTL).Err(); err != nil {
+			log.Warnw("rawrec geri düşüş kaydı Redis'e yazılamadı", err,
+				"sid", sid, "neden", g.Neden)
+		}
+	}()
 }
 
 func (w *Writer) dosyaAç(h *hedef) (*os.File, string, error) {

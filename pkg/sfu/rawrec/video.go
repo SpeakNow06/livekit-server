@@ -126,19 +126,29 @@ func NewVideoWriter(
 	if !Enabled() {
 		return nil
 	}
+	sid := string(trackID)
+	if trackInfo != nil && trackInfo.Sid != "" {
+		sid = trackInfo.Sid
+	}
 	// ⚠ SESSİZ NİL YOK — Aşama 1'de sessiz `return nil` bir saat kör aramaya
 	// mal oldu. Her çıkış yolu loglanıyor.
+	//
+	// ⚠ UYARI SEVİYESİ + REDİS KAYDI (Aşama 0, 2026-09-13). Eskiden INFO idi
+	// ve kayıt sessizce tarayıcı yedeğine düşüyordu — kayıt 876'da mobil
+	// öğrencinin H.264 paylaşımı böyle kaçtı (mobil uygulama bilerek H.264
+	// yayınlıyor, `mobil/src/lib/classroom/config.ts:42`). Gerekçe ve anahtar
+	// düzeni: rawrec.go `geriDususYaz`.
 	if mimeType != mime.MimeTypeVP9 {
-		log.Infow("rawrec görüntü: VP9 değil, SFU yazmıyor (tarayıcı yedeği devrede)",
-			"track", trackID, "mime", mimeType.String())
+		log.Warnw("rawrec görüntü: VP9 değil, SFU yazmıyor (tarayıcı yedeği devrede)",
+			nil, "track", trackID, "sid", sid, "mime", mimeType.String(),
+			"kaynak", kaynakAdı(trackInfo))
+		geriDususYaz(sid, geriDusus{Neden: "kodek", Mime: mimeType.String(),
+			Kaynak: kaynakAdı(trackInfo), Track: string(trackID),
+			Ayrinti: "SFU ham yazıcısı yalnız VP9 yazıyor"}, log)
 		return nil
 	}
 	if clockRate == 0 {
 		clockRate = 90000 // video için tek makul değer
-	}
-	sid := string(trackID)
-	if trackInfo != nil && trackInfo.Sid != "" {
-		sid = trackInfo.Sid
 	}
 	en, boy := üstKatmanBoyutu(trackInfo)
 	w := &VideoWriter{
@@ -635,6 +645,9 @@ func (w *VideoWriter) loop() {
 				birKezLogla(&w.errLogged, w.log,
 					"rawrec görüntü dosyası açılamadı", err)
 				vazgeç = true
+				geriDususYaz(w.sid, geriDusus{Neden: "dosya-acilamadi",
+					Kaynak: kaynakAdı(w.trackInfo), Track: string(w.trackID),
+					Ayrinti: err.Error()}, w.log)
 				return
 			}
 			ivf = newIvfYazıcı(fh, w.en, w.boy)
@@ -1061,14 +1074,21 @@ func (w *VideoWriter) loop() {
 			if h == nil {
 				// ⚠ KALICI VAZGEÇME YOK — gerekçe rawrec.go'da (kayıt 177).
 				if !tamponDurdu && time.Since(ilkPaketAn) > waitFor {
-					w.log.Infow("rawrec görüntü hedef hâlâ yok, tampon "+
-						"bırakıldı (arama sürüyor)", "track", w.trackID,
+					// UYARI seviyesi + Redis kaydı (Aşama 0): 870-872'de kamera
+					// tam bu yoldan sessizce tarayıcı yedeğine düşmüştü.
+					w.log.Warnw("rawrec görüntü hedef hâlâ yok, tampon "+
+						"bırakıldı (arama sürüyor)", nil, "track", w.trackID,
 						"sid", w.sid, "bekleme", waitFor,
-						"bırakılan_paket", len(bekleyen))
+						"bırakılan_paket", len(bekleyen),
+						"kaynak", kaynakAdı(w.trackInfo))
 					tamponDurdu = true
 					sagl.tamponDurdu = true
 					bekleyen = nil
 					tik.Reset(geçAramaAralığı)
+					geriDususYaz(w.sid, geriDusus{Neden: "hedef-yok",
+						Kaynak: kaynakAdı(w.trackInfo), Track: string(w.trackID),
+						Ayrinti: fmt.Sprintf("%s içinde kayıt anahtarı bulunamadı, "+
+							"arama sürüyor", waitFor)}, w.log)
 				}
 				continue
 			}
