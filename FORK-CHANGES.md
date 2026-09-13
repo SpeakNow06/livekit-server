@@ -1065,7 +1065,7 @@ dosyası varsa bütün tarayıcı kopyaları atılır — o SFU dosyası mobil
   testi `sid`/`cid` alanlarını doğruluyor.
 
 **Image:** `ghcr.io/speaknow06/livekit-server:v1.11.0-rawrec38` (2026-09-13 gece,
-rawrec36'nın üstüne §27+§28; compose `SN_RAWREC_WAIT=2`; CANLI 2026-09-14 00:0x).
+rawrec36'nın üstüne §27+§28; compose `SN_RAWREC_WAIT=2`; CANLI 2026-09-13 23:57).
 rawrec37 imajı atlandı (38 onu kapsıyor).
 
 ## 25. rawrec: KAYIT ÖNCESİ paketler dosyaya girmez (2026-09-13, kayıt 882)
