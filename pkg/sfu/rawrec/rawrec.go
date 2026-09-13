@@ -618,7 +618,12 @@ func (w *Writer) hedefAra() *hedef { return hedefAra(w.sid, w.log) }
 //
 // Hangisi geç yazılırsa yazılsın çağıran beklemeye devam ediyor; ikisinin
 // yazılma SIRASI önemsiz. Ses ve görüntü yazıcılarının ORTAK yolu.
-func hedefAra(sid string, log logger.Logger) *hedef {
+//
+// DEĞİŞKEN, FONKSİYON DEĞİL (Aşama 1, 2026-09-13): replay testi
+// (`video_replay_test.go`) Redis'e gitmeden hedefi verebilsin diye.
+var hedefAra = hedefAraRedis
+
+func hedefAraRedis(sid string, log logger.Logger) *hedef {
 	ctx, iptal := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer iptal()
 
