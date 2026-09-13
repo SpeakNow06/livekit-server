@@ -110,12 +110,12 @@ type saglik struct {
 	// sonPaket ilerlemeye devam ediyor, yazılan kalıyor.
 	sonPaket time.Time
 
-	tamponDurdu bool   // hedef geç bulundu, bekleyen paketler atıldı
+	tamponDurdu       bool          // hedef geç bulundu, bekleyen paketler atıldı
 	kayitOncesiAtilan time.Duration // kayıt başlangıcından önceki, atılan tampon süresi
-	ilkSeq      uint16 // ilk RTP sıra numarası
-	sonSeq      uint16
-	seqVar      bool
-	alinanPaket uint64 // gerçekten gelen ASIL paket (yedekler hariç)
+	ilkSeq            uint16        // ilk RTP sıra numarası
+	sonSeq            uint16
+	seqVar            bool
+	alinanPaket       uint64 // gerçekten gelen ASIL paket (yedekler hariç)
 
 	// ⚠ KATMAN BAŞINA SAYILIR, DOSYA BAŞINA TOPLANIR (2026-09-04).
 	// Tek dosyada birden çok katman olabiliyor (bkz. video.go
