@@ -1064,8 +1064,33 @@ dosyası varsa bütün tarayıcı kopyaları atılır — o SFU dosyası mobil
 - Replay testi altın değeri değişmedi (yan JSON hash'e girmiyor); iki katman
   testi `sid`/`cid` alanlarını doğruluyor.
 
-**Image:** `ghcr.io/speaknow06/livekit-server:v1.11.0-rawrec34` (2026-09-13,
-prod'da canlı — rawrec33'ün üstüne §24).
+**Image:** `ghcr.io/speaknow06/livekit-server:v1.11.0-rawrec35` (2026-09-13,
+rawrec34'ün üstüne §25).
+
+## 25. rawrec: KAYIT ÖNCESİ paketler dosyaya girmez (2026-09-13, kayıt 882)
+
+**Sorun:** yazıcı hedefi (kayıt anahtarını) beklerken biriktirdiği HER paketi
+dosyaya yazıyordu. Paylaşım kayıttan 57 sn önce açılınca dosyanın başına
+57 sn'lik, anahtar karesiz tek bir parça (10,8 MB) oturdu; kaydın ilk saniyesi o
+parçanın sonuna düştü. Tarayıcı başa her dönüşte 10,8 MB indirip 550 kare çözdü
+(Chrome 256 KB'lık dilimlerle iki nokta arasında gidip geliyor: 68 aralık isteği;
+hızlı hatta 18 sn, kullanıcıda ~60 sn "İçerik yükleniyor…"). Aynısı mikrofon ve
+paylaşım sesinde de vardı (52-57 sn kayıt öncesi ses).
+
+**Çözüm:** kayıt servisi oda anahtarına `baslangic_ms` (kaydın başlangıcı, unix ms;
+satır oluşur oluşmaz, robot girmeden yazılıyor) ekliyor. Yazıcı hedefi bulunca
+`hedef.kesim()` = başlangıç − `SN_RAWREC_ONROL_SN` (varsayılan 2 sn) anından
+eski paketleri atıyor (ses: rawrec.go "hedef var ama dosya açılmadı" dalı;
+görüntü: video.go "hedef bulundu" kuyruğu). Görüntüde dosya zaten ilk anahtar
+kareyle açılıyor ve hedefte PLI atılıyor → dosya kayıt anındaki tam kareden
+başlar, sonra 4 sn'de bir sürer. Sağlık tabanı kesime çekiliyor
+(`saglik.kesimUygulandi`) ki "akış ömrünün yarısından azı yazıldı" kararı
+şişmesin; yan JSON'a `kayit_oncesi_atilan_sn` yazılıyor. Eski anahtar (alan yok)
+→ eski davranış (tamponun tamamı yazılır). Tampon, "anahtar geç gelirse"
+sigortası olarak duruyor ama artık dosyaya girmiyor.
+
+Log: `rawrec kayıt öncesi paketler atıldı` / `rawrec görüntü kayıt öncesi
+paketler atıldı` (atilan/tutulan/kesim).
 
 ⚠ **Türev zinciri sıfırlandı.** rawrec19'dan beri her sürüm bir öncekinden
 `FROM` aldığı için eski binary'ler katmanlarda birikiyordu: 192 → 263 → 335 →

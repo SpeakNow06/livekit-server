@@ -1122,6 +1122,24 @@ func (w *VideoWriter) loop() {
 			// Bekleyeni sırayla işle, sonra normal akışa geç.
 			kuyruk := bekleyen
 			bekleyen = nil
+			// KAYIT ÖNCESİNİ ATMA (bkz. hedef.kesim, rawrec.go): başlangıçtan
+			// önceki paketler dosyaya girmez. Dosya zaten ilk anahtar kareyle
+			// açılıyor; yukarıdaki PLI o kareyi hemen getirir.
+			if kesim := h.kesim(); !kesim.IsZero() {
+				tutulan := kuyruk[:0:0]
+				for _, b := range kuyruk {
+					if !b.geliş.Before(kesim) {
+						tutulan = append(tutulan, b)
+					}
+				}
+				if atilan := len(kuyruk) - len(tutulan); atilan > 0 {
+					w.log.Infow("rawrec görüntü kayıt öncesi paketler atıldı",
+						"track", w.trackID, "atilan", atilan, "tutulan", len(tutulan),
+						"kesim", kesim.Format(time.RFC3339Nano))
+				}
+				kuyruk = tutulan
+				sagl.kesimUygulandi(kesim)
+			}
 			for _, b := range kuyruk {
 				if b.katman != suAnkiKatman {
 					continue // katman değişmişse eski paketler atılır

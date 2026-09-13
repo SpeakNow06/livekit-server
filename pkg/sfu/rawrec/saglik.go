@@ -111,6 +111,7 @@ type saglik struct {
 	sonPaket time.Time
 
 	tamponDurdu bool   // hedef geç bulundu, bekleyen paketler atıldı
+	kayitOncesiAtilan time.Duration // kayıt başlangıcından önceki, atılan tampon süresi
 	ilkSeq      uint16 // ilk RTP sıra numarası
 	sonSeq      uint16
 	seqVar      bool
@@ -163,6 +164,19 @@ func (s *saglik) paketGeldi(seq uint16, an time.Time) {
 
 // katmanDegisti — yazılan katman değişti: biten katmanın paket sayıları
 // birikime devrediliyor ve sıra numarası izleme sıfırlanıyor.
+// kesimUygulandi — kayıt öncesi paketler atıldı: "bağlı süre" tabanı kesime
+// çekilir (aksi halde yazılan/bağlı oranı kayıt öncesiyle şişer ve dosya
+// haksız yere "eksik" sayılırdı). Atılan süre yan JSON'a yazılır.
+func (s *saglik) kesimUygulandi(kesim time.Time) {
+	if s == nil || kesim.IsZero() {
+		return
+	}
+	if kesim.After(s.baslangic) {
+		s.kayitOncesiAtilan = kesim.Sub(s.baslangic)
+		s.baslangic = kesim
+	}
+}
+
 func (s *saglik) katmanDegisti() {
 	if s == nil || !s.seqVar {
 		return
@@ -269,6 +283,9 @@ func (s *saglik) rapor() map[string]any {
 		if yazilan > 0 {
 			r["kare_atilan_hiz"] = yuvarla(float64(s.atilanKare) / yazilan)
 		}
+	}
+	if s.kayitOncesiAtilan > 0 {
+		r["kayit_oncesi_atilan_sn"] = yuvarla(s.kayitOncesiAtilan.Seconds())
 	}
 	if s.siraBosluk > 0 {
 		r["sira_boslugu"] = s.siraBosluk

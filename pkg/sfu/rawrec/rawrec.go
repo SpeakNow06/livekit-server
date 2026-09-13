@@ -100,6 +100,7 @@ var (
 	enabled bool
 	rdb     *redis.Client
 	waitFor time.Duration
+	onRol   time.Duration
 	// ⚠ errLogged BURADA DEĞİL — yazıcı başına (kayıt 178'de öğrenildi).
 	// Paket düzeyinde tekken SÜREÇ BOYUNCA tek satır yazılıyordu: ses
 	// yazıcısının "dosya açılamadı" hatası logu tüketti ve VİDEO yazıcısının
@@ -174,6 +175,9 @@ func initOnce() {
 	// kadar "kayıt satırı yok" deyip anahtarı yazamıyor. 10 sn'lik bekleme
 	// dolup vazgeçiyorduk. Bellek bedeli: 60 sn × 50 paket/sn × ~90 B ≈ 270 KB.
 	waitFor = time.Duration(envInt("SN_RAWREC_WAIT", 60)) * time.Second
+	// Kayıt başlangıcından bu kadar öncesi tutulur (anahtar birkaç yüz ms geç
+	// görülebiliyor; görüntüde zaten ilk anahtar kareden başlanıyor).
+	onRol = time.Duration(envInt("SN_RAWREC_ONROL_SN", 2)) * time.Second
 	pinHigh = envOr("SN_RAWREC_PIN_HIGH", "1") != "0"
 	kfEnÇokKare = envInt("SN_RAWREC_KEYFRAME_MAX_KARE", 24)
 	kfEnAzSn = time.Duration(envInt("SN_RAWREC_KEYFRAME_MIN_SN", 2)) * time.Second
@@ -221,6 +225,25 @@ func PinHigh() bool {
 type hedef struct {
 	RecordingID int    `json:"recording_id"`
 	Dir         string `json:"dir"`
+	// Kaydın başlangıç anı (unix ms) — kayıt servisi yazıyor (2026-09-13,
+	// kayıt 882). Yoksa/0 ise eski davranış: tampondaki her şey dosyaya girer.
+	BaslangicMs int64 `json:"baslangic_ms,omitempty"`
+}
+
+// kesim — kayıt ÖNCESİ paketlerin atılacağı an: başlangıç − ön pay. Başlangıç
+// bilinmiyorsa sıfır zaman (= kesme yok).
+//
+// NEDEN (kayıt 882): yazıcı hedefi beklerken biriktirdiği HER paketi dosyaya
+// yazıyordu. Paylaşım kayıttan 57 sn önce açılınca dosyanın başına 57 sn'lik,
+// anahtar karesiz tek bir parça (10,8 MB) oturdu; kaydın ilk saniyesi o parçanın
+// sonuna düştüğü için tarayıcı başa her dönüşte 10,8 MB indirip 550 kare çözdü
+// (68 aralık isteği, hızlı hatta 18 sn, kullanıcıda ~60 sn). Tampon "anahtar geç
+// gelirse" sigortasıdır; kayıt öncesinin dosyaya girmesi için sebep yok.
+func (h *hedef) kesim() time.Time {
+	if h == nil || h.BaslangicMs <= 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(h.BaslangicMs).Add(-onRol)
 }
 
 // trackEşleme — track anahtarının içeriği (webhook yazıyor).
@@ -515,6 +538,28 @@ func (w *Writer) loop() {
 				// Tampon bırakılmışsa elde bekleyen kalmadı; dosya bu
 				// paketten başlıyor. Çapa da ona göre kuruluyor.
 				bekleyen = append(bekleyen, p)
+				// KAYIT ÖNCESİNİ ATMA (bkz. hedef.kesim): başlangıçtan önceki
+				// paketler dosyaya girmez. Sağlık tabanı da kesime çekilir ki
+				// "akış ömrünün yarısından azı yazıldı" kararı bozulmasın.
+				if kesim := h.kesim(); !kesim.IsZero() {
+					tutulan := bekleyen[:0:0]
+					for _, b := range bekleyen {
+						if !b.geliş.Before(kesim) {
+							tutulan = append(tutulan, b)
+						}
+					}
+					if atilan := len(bekleyen) - len(tutulan); atilan > 0 {
+						w.log.Infow("rawrec kayıt öncesi paketler atıldı",
+							"track", w.trackID, "atilan", atilan, "tutulan", len(tutulan),
+							"kesim", kesim.Format(time.RFC3339Nano),
+							"kaynak", kaynakAdı(w.trackInfo))
+					}
+					if len(tutulan) == 0 {
+						tutulan = append(tutulan, p) // en yeni paket her zaman kalır
+					}
+					bekleyen = tutulan
+					sagl.kesimUygulandi(kesim)
+				}
 				ilkRTP = bekleyen[0].rtp
 				ilkAn = bekleyen[0].geliş
 				var err error
