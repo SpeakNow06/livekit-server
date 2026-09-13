@@ -997,7 +997,52 @@ koruma muhtemelen hiç tetiklenmiyor.
 Değişiklik yine de bırakıldı: koruma bir gün tetiklenirse milisaniye
 çözünürlüklü bir kapta 1 ms itmek 11 µs itmekten doğrudur.
 
-**Image:** `ghcr.io/speaknow06/livekit-server:v1.11.0-rawrec32` (demo'da canlı).
+### 23. `pkg/sfu/rawrec` — KODEK-BAĞIMSIZ: H.264 (.ts) + geri düşüş görünür (2026-09-13)
+
+**Neden:** öğrenci mobil uygulaması kamerayı ve paylaşımı BİLEREK H.264
+yayınlıyor (`mobil/src/lib/classroom/config.ts:42,104`, telefon donanımla
+kodluyor); yazıcı yalnız VP9 bildiği için mobil öğrencinin her paylaşımı
+sessizce tarayıcı yedeğine düşüyordu (kayıt 876). 870-872'de öğretmen kamerası
+da (webhook CAMERA anahtarı yazılmadığı için) aynı sessiz yoldan gitti. Karar
+(kullanıcı, 2026-09-13): mobil aynen kalır, SFU H.264 yazar; VP8/AV1 istek
+gelirse. Plan ve iki turlu denetim: speaknow-server
+`docs/split-recording/SFU-KODEK-BAGIMSIZ-PLANI.md`.
+
+**Aşama 0 — görünürlük** (`rawrec.go geriDususYaz`): vazgeçiş
+`sn:rawrec:fallback:<sid>` → `{neden: kodek | hedef-yok | dosya-acilamadi,
+mime, kaynak, track, ayrinti, an}`, 12 sa TTL; kodek kapısı ve "hedef hâlâ
+yok" logları INFO → WARN. speaknow-server tarafı (`postprocess.py
+_geri_dusus_raporla`) bunu okuyup `recordings.kaynak_uyari` +
+`recording_events` + admin olayı üretiyor; panoda "Yedek kaynak" rozeti.
+
+**Aşama 1 — arayüz** (`kodek.go`, `vp9.go`): `kodekAyiklayici`
+(Ayikla / AnahtarBaslangici / Dogrula / Uzanti / YeniKap) + `kapYazici`
+(write / finish). `video.go` kodeği bilmiyor; uzantı ve fourcc kodekten.
+Kabul ölçütü `video_replay_test.go`: deterministik paket dizisi (kayıp, sıra
+bozukluğu, kopya, E'siz marker, başsız kare, eş damga) refactor öncesiyle
+BYTE BİREBİR aynı `.ivf` (sha256 `e3862b35…`, 115 kare). `hedefAra` artık
+değişken (test enjeksiyonu).
+
+**Aşama 4 — H.264** (`h264.go`, `ts.go`): pion `codecs.H264Packet` akış
+başına TEK örnek (FU-A'yı kendi içinde biriktiriyor; damga değişince
+sıfırlanıyor); kare sınırı damga değişimi + marker; anahtar başlangıcı
+tamponun bayrağı (SPS taşıyan paket). Kap: tarayıcı yolunun Python
+`_TsWriter`'ının birebir Go karşılığı (aynı PID / PES / PCR düzeni;
+`TestTsPythonBirebir`: aynı kareler → aynı bayt). Uzantı `.ts` → postprocess
+`.mp4`e remux ediyor; saat kayması düzeltmesi `recording_service/ts_damga.py`
+ile TS'e de uygulanıyor. Testler (ffmpeg varsa): libx264 akışı → pion
+payloader (STAP-A / FU-A) → yazıcı → ffprobe 30/30 kare, PTS adımı 6000; bir
+FU-A parçası düşünce 29/30 ve sıfır çözme hatası. FU-B ve NAL 25-27
+desteklenmiyor → kare atılır, sağlık raporuna girer.
+
+**Log değişikliği:** "rawrec görüntü: VP9 değil" → "rawrec görüntü:
+desteklenmeyen kodek" (+ `desteklenen` alanı). Prod grep'leri buna göre.
+
+**Yerel araç:** Go 1.27 ve ffmpeg brew ile kuruldu; `go test
+./pkg/sfu/rawrec/` yerelde çalışıyor. İmaj build'i yine prod'da (TAM build).
+
+**Image:** `ghcr.io/speaknow06/livekit-server:v1.11.0-rawrec33` (2026-09-13,
+prod'da canlı — rawrec32'nin üstüne §23).
 
 ⚠ **Türev zinciri sıfırlandı.** rawrec19'dan beri her sürüm bir öncekinden
 `FROM` aldığı için eski binary'ler katmanlarda birikiyordu: 192 → 263 → 335 →
