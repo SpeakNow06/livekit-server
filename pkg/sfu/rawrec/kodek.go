@@ -13,8 +13,8 @@ import (
 // bağlıydı — kodek kapısı, kare birleştirme (B/E bitleri), anahtar kare
 // başlangıcı, "gerçekten VP9 mi" kontrolü ve IVF etiketi — ve altı yerde de
 // somut `*ivfYazıcı` tipine. Başka bir kodek (H.264: mobil uygulama bilerek
-// H.264 yayınlıyor; VP8/AV1: ileride ayar değişirse) geldiğinde yazıcı
-// sessizce çekiliyor ve kayıt tarayıcı yedeğine düşüyordu.
+// H.264 yayınlıyor; VP8/AV1: 2026-09-14'te eklendi, rawrec39) geldiğinde
+// yazıcı sessizce çekiliyor ve kayıt tarayıcı yedeğine düşüyordu.
 //
 // Kuyruk, sıra tamponu, saat/çapa matematiği, katman politikası, referans
 // katman kayması, bütünlük kapısı, sağlık raporu ve Redis kontrolü kodekten
@@ -68,11 +68,17 @@ func kodekSec(m mime.MimeType) kodekAyiklayici {
 	case mime.MimeTypeH264:
 		// İŞARETÇİ: FU-A parçalarını biriktiren durum taşıyor (h264.go).
 		return &h264Ayiklayici{}
+	case mime.MimeTypeVP8:
+		return vp8Ayiklayici{}
+	case mime.MimeTypeAV1:
+		// İŞARETÇİ: Z/Y parçalarını biriktiren depacketizer durumu (av1.go).
+		return &av1Ayiklayici{}
 	}
 	return nil
 }
 
 // desteklenenKodekler — günlük ve geri düşüş kaydı için liste.
+// (2026-09-14, rawrec39: VP8 ve AV1 eklendi — vp8.go, av1.go.)
 func desteklenenKodekler() string {
-	return strings.Join([]string{"VP9", "H264"}, ", ")
+	return strings.Join([]string{"VP9", "H264", "VP8", "AV1"}, ", ")
 }

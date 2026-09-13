@@ -1064,9 +1064,8 @@ dosyası varsa bütün tarayıcı kopyaları atılır — o SFU dosyası mobil
 - Replay testi altın değeri değişmedi (yan JSON hash'e girmiyor); iki katman
   testi `sid`/`cid` alanlarını doğruluyor.
 
-**Image:** `ghcr.io/speaknow06/livekit-server:v1.11.0-rawrec38` (2026-09-13 gece,
-rawrec36'nın üstüne §27+§28; compose `SN_RAWREC_WAIT=2`; CANLI 2026-09-13 23:57).
-rawrec37 imajı atlandı (38 onu kapsıyor).
+**Image:** çalışan `v1.11.0-rawrec38` (2026-09-13 23:57, §27+§28). `v1.11.0-rawrec39` (§29:
+VP8 + AV1) derleniyor, ders yokken geçilecek; compose `SN_RAWREC_WAIT=2`.
 
 ## 25. rawrec: KAYIT ÖNCESİ paketler dosyaya girmez (2026-09-13, kayıt 882)
 
@@ -1173,6 +1172,31 @@ açılana kadar 1 sn'de bir (10 yinelemeden sonra 5 sn'de bir) PLI yineleniyor
 (`ilkAnahtarPLIAraligi`, `ilkAnahtarPLIAraligiGec`); ticker bütçe kapalı olsa da
 sürüyor. Log: `rawrec görüntü: ilk anahtar kare bekleniyor, PLI yinelendi`
 (1-3, 5, 10, sonra her 12.). İmaj `v1.11.0-rawrec38` (rawrec37 + bu).
+
+## 29. rawrec: VP8 ve AV1 tanınıyor — dört codec aynı seviyede (2026-09-14)
+
+Kullanıcı: "VP8 ve AV1'i de VP9 ve H.264 gibi tanıması en doğrusu değil mi?" —
+evet; eksiklik kapsam kararıydı, teknik sınır değil. Duman testi (2026-09-14):
+SFU VP8/AV1 yazmıyordu ("kodek" geri düşüşü), tarayıcı kopyası da sabit VP90
+etiketiyle yazıldığı için çözülemiyordu (0/33 ve 0/60 kare).
+
+- `vp8.go` (`vp8Ayiklayici`, pion `codecs.VP8Packet`): kare = S=1,PID=0 →
+  marker; anahtar kare = tampon bayrağı (`buffer.VP8.IsKeyFrame`) + kare etiketi
+  P biti 0; `Dogrula` başlangıç kodu 9d 01 2a; IVF fourcc `VP80`.
+- `av1.go` (`av1Ayiklayici`, pion `codecs.AV1Depacketizer`): TU sınırı RTP damgası
+  değişimi; depacketizer Z/Y parçalarını birleştirip OBU boyut alanlarını ekliyor,
+  yazıcı TU başına temporal delimiter (0x12 0x00) koyuyor; anahtar kare = tampon
+  bayrağı (`buffer.IsAV1KeyFrame`: Z=0, N=1) ; `Dogrula` TD + sequence header
+  OBU; IVF fourcc `AV01`.
+- `kodekSec`: VP8 → vp8Ayiklayici, AV1 → &av1Ayiklayici; `desteklenenKodekler`
+  "VP9, H264, VP8, AV1". Kuyruk/tampon/katman/sağlık/PLI mantığı ortak.
+- Test `vp8_av1_replay_test.go`: ffmpeg libvpx (VP8) ve SVT-AV1 (AV1, düşük
+  gecikme) gerçek akışları pion paketleyicileriyle RTP'ye bölünüp yazıcıya
+  veriliyor; çıkan IVF ffprobe ile çözülüyor — 30/30 kare, doğru fourcc.
+- Eşlik eden web değişiklikleri (speaknow-server): worker kare başlığına codec
+  (`c`), share-ws fourcc'yi codec'e göre seçiyor (VP80/VP90/AV01), `ivf_kare`
+  anahtar kare tespiti fourcc'ye göre, sınıf `?vcodec=vp8|vp9|av1|h264` test
+  parametresi. İmaj `v1.11.0-rawrec39`.
 
 ## Rebuild
 ```bash

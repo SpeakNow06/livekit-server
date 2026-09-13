@@ -28,6 +28,8 @@ const (
 // bozuldu). Etiket bu yüzden kodekten geliyor (`kodekAyiklayici.YeniKap`),
 // yazıcı kendi başına seçmiyor.
 var ivfFourCCVP9 = [4]byte{'V', 'P', '9', '0'}
+var ivfFourCCVP8 = [4]byte{'V', 'P', '8', '0'}
+var ivfFourCCAV1 = [4]byte{'A', 'V', '0', '1'}
 
 type ivfYazıcı struct {
 	fh   *os.File
