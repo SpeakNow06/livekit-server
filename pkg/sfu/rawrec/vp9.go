@@ -1,6 +1,7 @@
 package rawrec
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -21,11 +22,19 @@ type vp9Ayiklayici struct{}
 
 func (vp9Ayiklayici) Adi() string { return "VP9" }
 
+var errVP9BosYuk = errors.New("vp9: başlık var, yük yok")
+
 func (vp9Ayiklayici) Ayikla(p vpaket) ([]byte, bool, bool, error) {
 	var h codecs.VP9Packet
 	veri, err := h.Unmarshal(p.payload)
 	if err != nil {
 		return nil, false, false, err
+	}
+	// Boş yük VP9'da çözülemeyen paket sayılıyor (refactor öncesi davranış:
+	// `err != nil || len(veri) == 0` → kare atılır). H.264'te boş parça
+	// normal (FU-A biriktirme), o yüzden karar kodekte veriliyor.
+	if len(veri) == 0 {
+		return nil, false, false, errVP9BosYuk
 	}
 	return veri, h.B, h.E || p.marker, nil
 }

@@ -65,11 +65,14 @@ func kodekSec(m mime.MimeType) kodekAyiklayici {
 	switch m {
 	case mime.MimeTypeVP9:
 		return vp9Ayiklayici{}
+	case mime.MimeTypeH264:
+		// İŞARETÇİ: FU-A parçalarını biriktiren durum taşıyor (h264.go).
+		return &h264Ayiklayici{}
 	}
 	return nil
 }
 
 // desteklenenKodekler — günlük ve geri düşüş kaydı için liste.
 func desteklenenKodekler() string {
-	return strings.Join([]string{"VP9"}, ", ")
+	return strings.Join([]string{"VP9", "H264"}, ", ")
 }

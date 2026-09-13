@@ -1487,9 +1487,11 @@ func (w *VideoWriter) işle(p vpaket, kopuk bool, parça *[]byte, topluyor *bool
 	}
 
 	veri, basla, bitir, err := w.kodek.Ayikla(p)
-	if err != nil || len(veri) == 0 {
+	if err != nil {
 		// Çözülemeyen paket: içinde bulunduğu kareyi de bozar, toplamayı
 		// iptal et. Bir sonraki kare başlangıcında temiz başlarız.
+		// (Boş verinin hata olup olmadığına kodek karar veriyor: VP9'da
+		// hata, H.264'te FU-A biriktirme.)
 		atla(true)
 		return
 	}
