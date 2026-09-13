@@ -494,7 +494,7 @@ func (w *Writer) loop() {
 			// Kayıp ölçümü ASIL paketler üstünden (yedek blokların sıra
 			// numarası taşıyıcı paketinki, kendilerinin değil).
 			if !p.yedek {
-				sagl.paketGeldi(p.seq)
+				sagl.paketGeldi(p.seq, p.geliş)
 			}
 
 			// ── 1. Hedef henüz bilinmiyor: beklet ───────────────────────
@@ -743,7 +743,7 @@ func (w *Writer) yanJSON(yol string, ilkAn time.Time, kare int, ilkRTP, sonRel u
 	sr *livekit.RTCPSenderReportState, sagl *saglik, redKurtarilan uint64,
 	srGunluk []srOrnek) {
 	yanJSONYaz(yanParam{
-		yol: yol, ilkAn: ilkAn, kare: kare, ilkRTP: ilkRTP, sonRel: sonRel,
+		yol: yol, sid: w.sid, ilkAn: ilkAn, kare: kare, ilkRTP: ilkRTP, sonRel: sonRel,
 		clockRate: w.clockRate, sr: sr, buff: w.buff, log: w.log,
 		trackID: w.trackID, düşen: w.düşen.Load(), etiket: "ses",
 		srGunluk: srGunluk, capaKatman: 0,
@@ -820,6 +820,7 @@ const srGunluguUstSinir = 20000
 // dosyayı üretiyor; tek fark `etiket` (log satırı) ve `clockRate`.
 type yanParam struct {
 	yol        string
+	sid        string // LiveKit track SID (TR_…) — postprocess SFU ↔ tarayıcı eşleşmesi için
 	ilkAn      time.Time
 	kare       int
 	ilkRTP     uint32
@@ -946,6 +947,16 @@ func yanJSONYaz(p yanParam) {
 		"last_rtp_rel":   sonRel,
 		"rtp_hz":         p.clockRate,
 		"capa_kaynak":    "sfu-sr",
+		// AKIŞ KİMLİĞİ (2026-09-13, kayıt 877). Tarayıcı kopyası dosya adını
+		// track SID'inden kuruyor (`NN_<TR_…>`), SFU dosyası ise istemci
+		// kimliğinden (`NN_sfu_<cid>`); ikisi ad üstünden eşleşemiyordu ve
+		// postprocess "SFU mu tarayıcı mı" kararını KLASÖR başına veriyordu.
+		// Aynı derste bir paylaşımın SFU dosyası elenip başka bir paylaşımın
+		// SFU dosyası sağlam çıkınca elenen paylaşımın tarayıcı kopyası da
+		// atıldı, 30 saniyelik paylaşım kayda hiç girmedi. SID ile karar
+		// akış başına veriliyor (`_sfu_asil_tarayici_yedek`).
+		"sid": p.sid,
+		"cid": string(p.trackID),
 	}
 	if len(p.srGunluk) > 0 {
 		veri["sr_gunlugu"] = p.srGunluk

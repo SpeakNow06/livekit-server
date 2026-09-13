@@ -1041,8 +1041,31 @@ desteklenmeyen kodek" (+ `desteklenen` alanı). Prod grep'leri buna göre.
 **Yerel araç:** Go 1.27 ve ffmpeg brew ile kuruldu; `go test
 ./pkg/sfu/rawrec/` yerelde çalışıyor. İmaj build'i yine prod'da (TAM build).
 
-**Image:** `ghcr.io/speaknow06/livekit-server:v1.11.0-rawrec33` (2026-09-13,
-prod'da canlı — rawrec32'nin üstüne §23).
+### 24. `rawrec/{saglik,rawrec,video}.go` — susturulmuş track "eksik" değil; yan JSON'a SID (2026-09-13, kayıt 877)
+
+**Olay:** öğretmen paylaşımı 30 sn sonra susturuldu (bilgisayar kilitlendi →
+Chrome yakalamayı mute etti → istemci 5 sn sonra `Mute` sinyali yolladı) ve
+dersin sonuna kadar öyle kaldı. Yazıcı 106 sn bağlı, kare yalnız ilk 31 sn;
+tarayıcı kopyası da aynı 512 kare. Sağlık kuralı "akış ömrünün yarısından
+azı yazıldı → eksik" dedi; postprocess klasör kuralıyla (kullanılabilir SFU
+dosyası varsa bütün tarayıcı kopyaları atılır — o SFU dosyası mobil
+öğrencinin H.264 paylaşımıydı) öğretmenin tarayıcı kopyasını da attı.
+30 saniyelik paylaşım kayda hiç girmedi.
+
+**Değişiklik:**
+- `saglik.paketGeldi(seq, an)` son paketin anını tutuyor; `bagli_sn` artık
+  yazıcının kuruluşundan SON PAKETE kadar. Susturulmuş/susmuş kuyruk "eksik"
+  saymıyor; gerçek arıza (paket geliyor, kare yazılamıyor — kayıt 182) yine
+  yakalanıyor.
+- Yan JSON'a `sid` (LiveKit track SID) ve `cid` (istemci kimliği) eklendi.
+  Tarayıcı kopyası `NN_<sid>` adıyla yazıldığı için postprocess artık SFU ↔
+  tarayıcı eşleşmesini akış başına kuruyor (`_sfu_tarayici_esle`); SID'siz
+  eski dosyalarda ilk kare zamanıyla eşleşiyor.
+- Replay testi altın değeri değişmedi (yan JSON hash'e girmiyor); iki katman
+  testi `sid`/`cid` alanlarını doğruluyor.
+
+**Image:** `ghcr.io/speaknow06/livekit-server:v1.11.0-rawrec34` (2026-09-13,
+prod'da canlı — rawrec33'ün üstüne §24).
 
 ⚠ **Türev zinciri sıfırlandı.** rawrec19'dan beri her sürüm bir öncekinden
 `FROM` aldığı için eski binary'ler katmanlarda birikiyordu: 192 → 263 → 335 →

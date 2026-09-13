@@ -521,7 +521,7 @@ func (w *VideoWriter) loop() {
 		if yol != "" {
 			sagl.siraDurumu(sira.bosluk, sira.gecPaket)
 			yanJSONYaz(yanParam{
-				yol: yol, ilkAn: ilkAn, kare: kare, ilkRTP: ilkRTP,
+				yol: yol, sid: w.sid, ilkAn: ilkAn, kare: kare, ilkRTP: ilkRTP,
 				sonRel: uint32(max64(sonPTS, 0)), clockRate: w.clockRate,
 				sr: sonSR, buff: w.kaynak(dosyaKatmanı), log: w.log, trackID: w.trackID,
 				düşen: w.düşen.Load(), etiket: "görüntü",
@@ -1187,7 +1187,7 @@ func (w *VideoWriter) loop() {
 				susmaLogla = false
 			}
 			sonPaket = p.geliş
-			sagl.paketGeldi(p.seq)
+			sagl.paketGeldi(p.seq, p.geliş)
 
 			// ── 1. Hedef henüz bilinmiyor: beklet ───────────────────────
 			if h == nil {

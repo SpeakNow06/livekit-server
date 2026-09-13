@@ -24,6 +24,7 @@ package rawrec
 // yapıyor.
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -312,8 +313,13 @@ func TestReplayIkiKatmanSayim(t *testing.T) {
 			t.Fatalf("damga artan değil: kare %d", i)
 		}
 	}
-	// Yan JSON yazılmış olmalı.
-	if _, err := os.Stat(yol[:len(yol)-4] + ".json"); err != nil {
+	// Yan JSON yazılmış olmalı ve akış kimliğini taşımalı (postprocess SFU ↔
+	// tarayıcı eşleşmesini SID ile yapıyor, kayıt 877).
+	j, err := os.ReadFile(yol[:len(yol)-4] + ".json")
+	if err != nil {
 		t.Fatalf("yan JSON yok: %v", err)
+	}
+	if !bytes.Contains(j, []byte(`"sid":"TR_TEST"`)) || !bytes.Contains(j, []byte(`"cid":"cid-test"`)) {
+		t.Fatalf("yan JSON'da sid/cid yok: %s", j[:min(200, len(j))])
 	}
 }

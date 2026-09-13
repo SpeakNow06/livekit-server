@@ -97,6 +97,19 @@ type saglik struct {
 	sonKare    time.Time // dosyaya son kare yazıldı
 	enBuyukAra time.Duration
 
+	// sonPaket — yayıncıdan EN SON paket ne zaman geldi. "Bağlı süre" artık
+	// buraya kadar sayılıyor, yazıcının track'e bağlı kaldığı ana kadar
+	// DEĞİL (2026-09-13, kayıt 877): öğretmenin paylaşım track'i dersin
+	// yarısından uzun süre SUSTURULMUŞ kaldı (bilgisayar kilitlendi, Chrome
+	// yakalamayı mute etti, istemci sunucuya mute yolladı). Yazıcı 106 sn
+	// bağlıydı, kare yalnız ilk 31 sn'de geldi — tarayıcı kopyası da aynı 31
+	// sn'yi taşıyordu, yani hiçbir şey kaçmamıştı. Eski ölçüt "yarısından azı
+	// yazıldı → eksik" dedi ve dosya elendi. Susturulmuş ya da susmuş bir
+	// yayıncı yazıcı arızası değildir; ölçü son paketle bitmeli. Gerçek arıza
+	// (paket geliyor, kare yazılamıyor — kayıt 182) yine yakalanıyor: orada
+	// sonPaket ilerlemeye devam ediyor, yazılan kalıyor.
+	sonPaket time.Time
+
 	tamponDurdu bool   // hedef geç bulundu, bekleyen paketler atıldı
 	ilkSeq      uint16 // ilk RTP sıra numarası
 	sonSeq      uint16
@@ -131,8 +144,9 @@ func yeniSaglik() *saglik { return &saglik{baslangic: simdi()} }
 func simdi() time.Time { return time.Now() }
 
 // paketGeldi — ASIL (yedek olmayan) bir paket geldiğinde çağrılır; kayıp
-// ölçümü RTP sıra numarası üstünden yapılıyor.
-func (s *saglik) paketGeldi(seq uint16) {
+// ölçümü RTP sıra numarası üstünden yapılıyor. `an` paketin geliş anı
+// (bağlı sürenin sonu, bkz. `sonPaket`).
+func (s *saglik) paketGeldi(seq uint16, an time.Time) {
 	if s == nil {
 		return
 	}
@@ -142,6 +156,9 @@ func (s *saglik) paketGeldi(seq uint16) {
 		s.sonSeq = seq
 	}
 	s.alinanPaket++
+	if an.After(s.sonPaket) {
+		s.sonPaket = an
+	}
 }
 
 // katmanDegisti — yazılan katman değişti: biten katmanın paket sayıları
@@ -191,7 +208,13 @@ func (s *saglik) rapor() map[string]any {
 	if s == nil {
 		return nil
 	}
-	bagli := simdi().Sub(s.baslangic).Seconds()
+	// Bağlı süre = yazıcı kuruldu → SON PAKET (susturulmuş kuyruk sayılmaz,
+	// gerekçe `sonPaket`). Hiç paket gelmediyse eski ölçü (şimdiye kadar).
+	bagliSon := simdi()
+	if !s.sonPaket.IsZero() {
+		bagliSon = s.sonPaket
+	}
+	bagli := bagliSon.Sub(s.baslangic).Seconds()
 	yazilan := 0.0
 	if !s.ilkKare.IsZero() {
 		yazilan = s.sonKare.Sub(s.ilkKare).Seconds()
