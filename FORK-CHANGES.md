@@ -1064,9 +1064,8 @@ dosyası varsa bütün tarayıcı kopyaları atılır — o SFU dosyası mobil
 - Replay testi altın değeri değişmedi (yan JSON hash'e girmiyor); iki katman
   testi `sid`/`cid` alanlarını doğruluyor.
 
-**Image:** çalışan `ghcr.io/speaknow06/livekit-server:v1.11.0-rawrec35` (§25).
-`v1.11.0-rawrec36` (§26) 2026-09-13 22:02'de derlendi + ghcr'a push edildi, DEPLOY
-BEKLİYOR (canlı ders): compose'da etiket + `SN_RAWREC_WAIT=60` → `10`.
+**Image:** `ghcr.io/speaknow06/livekit-server:v1.11.0-rawrec36` (2026-09-13 23:00,
+rawrec35'in üstüne §26; compose `SN_RAWREC_WAIT=10`).
 
 ## 25. rawrec: KAYIT ÖNCESİ paketler dosyaya girmez (2026-09-13, kayıt 882)
 
