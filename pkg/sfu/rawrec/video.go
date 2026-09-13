@@ -8,8 +8,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/pion/rtp/codecs"
-
 	"github.com/livekit/protocol/codecs/mime"
 	"github.com/livekit/protocol/livekit"
 	"github.com/livekit/protocol/logger"
@@ -36,12 +34,13 @@ import (
 //     çözücü hiçbir şey çözemez ve postprocess'in kare taraması sıfır kare
 //     bulur — kayıt sessizce görüntüsüz çıkar.
 //
-//  3. YALNIZ VP9. IVF dosyasını `VP90` etiketiyle yazıyoruz; başka bir kodek
-//     bu etiketle geçerli GÖRÜNÜR ama çözülemez (kayıt 124: H.264, kayıt 158:
-//     AV1 — ikisi de görüntüsüz çıktı). H.264 gelirse yazıcı hiç kurulmuyor
-//     ve TARAYICI YEDEĞİ devreye giriyor; kayıt kurtuluyor.
-//     Proje bugün her iki akışta da VP9 yayınlıyor
-//     (`classroom-media-config.js` → `VIDEO_CODEC = 'vp9'`).
+//  3. KODEK ARAYÜZÜN ARKASINDA (Aşama 1, 2026-09-13). Kare birleştirme, anahtar
+//     kare başlangıcı, doğrulama ve kap seçimi `kodekAyiklayici`den geliyor
+//     (kodek.go); bu dosya kodeğin ne olduğunu bilmiyor. Desteklenmeyen kodek
+//     gelirse yazıcı hiç kurulmuyor, uyarı + Redis geri düşüş kaydıyla
+//     TARAYICI YEDEĞİ devreye giriyor; kayıt kurtuluyor. Eskiden "yalnız VP9"
+//     buraya gömülüydü: kayıt 124 (H.264) ve 158 (AV1) IVF'e `VP90` etiketiyle
+//     yazılıp görüntüsüz çıkmıştı; etiket artık kodekten geliyor.
 
 // vpaket — kanaldan geçen iş birimi. `ExtPacket`'ı TUTMUYORUZ: dayanağı
 // forwardRTP'nin yeniden kullandığı tampon, kopyalamak ŞART.
@@ -62,6 +61,7 @@ type VideoWriter struct {
 	trackInfo *livekit.TrackInfo
 	clockRate uint32
 	mimeType  mime.MimeType
+	kodek     kodekAyiklayici // kodeğe özgü her şey burada (kodek.go)
 	en, boy   uint16
 	buff      srKaynak // yazıcıyı kuran katmanın kaynağı (varsayılan)
 	log       logger.Logger
@@ -138,13 +138,14 @@ func NewVideoWriter(
 	// öğrencinin H.264 paylaşımı böyle kaçtı (mobil uygulama bilerek H.264
 	// yayınlıyor, `mobil/src/lib/classroom/config.ts:42`). Gerekçe ve anahtar
 	// düzeni: rawrec.go `geriDususYaz`.
-	if mimeType != mime.MimeTypeVP9 {
-		log.Warnw("rawrec görüntü: VP9 değil, SFU yazmıyor (tarayıcı yedeği devrede)",
+	kodek := kodekSec(mimeType)
+	if kodek == nil {
+		log.Warnw("rawrec görüntü: desteklenmeyen kodek, SFU yazmıyor (tarayıcı yedeği devrede)",
 			nil, "track", trackID, "sid", sid, "mime", mimeType.String(),
-			"kaynak", kaynakAdı(trackInfo))
+			"desteklenen", desteklenenKodekler(), "kaynak", kaynakAdı(trackInfo))
 		geriDususYaz(sid, geriDusus{Neden: "kodek", Mime: mimeType.String(),
 			Kaynak: kaynakAdı(trackInfo), Track: string(trackID),
-			Ayrinti: "SFU ham yazıcısı yalnız VP9 yazıyor"}, log)
+			Ayrinti: "SFU ham yazıcısı yalnız " + desteklenenKodekler() + " yazıyor"}, log)
 		return nil
 	}
 	if clockRate == 0 {
@@ -157,6 +158,7 @@ func NewVideoWriter(
 		trackInfo: trackInfo,
 		clockRate: clockRate,
 		mimeType:  mimeType,
+		kodek:     kodek,
 		en:        en,
 		boy:       boy,
 		buff:      buff,
@@ -178,7 +180,7 @@ func NewVideoWriter(
 		w.ölüEşiği, w.yukarıTik = ölüEşiğiKamera, yukarıTikKamera
 	}
 	go w.loop()
-	log.Infow("rawrec görüntü yazıcı kuruldu", "sid", sid,
+	log.Infow("rawrec görüntü yazıcı kuruldu", "sid", sid, "kodek", kodek.Adi(),
 		"üst_katman", üstKatman,
 		"ölü_eşiği", w.ölüEşiği, "yukarı_tik", w.yukarıTik,
 		"kaynak", kaynakAdı(trackInfo), "hz", clockRate,
@@ -401,7 +403,7 @@ func (w *VideoWriter) loop() {
 	var (
 		h           *hedef
 		bekleyen    []vpaket
-		ivf         *ivfYazıcı
+		kap         kapYazici // kodeğin kabı (IVF / TS), bkz. kodek.go
 		fh          *os.File
 		yol         string
 		ilkRTP      uint32
@@ -508,9 +510,9 @@ func (w *VideoWriter) loop() {
 	// değişiminde de, akış sonunda da BU çağrılıyor; bu yüzden birden çok
 	// kez çağrılabilir olması şart.
 	dosyaKapat := func() {
-		if ivf != nil {
-			ivf.finish()
-			ivf = nil
+		if kap != nil {
+			kap.finish()
+			kap = nil
 		}
 		if fh != nil {
 			fh.Close()
@@ -629,15 +631,14 @@ func (w *VideoWriter) loop() {
 			if !anahtarKare {
 				return // anahtar kare beklemedeyiz
 			}
-			// ⚠ VP9 MI GERÇEKTEN — SESSİZ BOZULMAYA KARŞI KORUMA.
-			// VP9 kare başlığının ilk 2 biti frame_marker = 0b10. Ölçüldü:
-			// VP9 → 2, AV1 → 0. Yanlışsa dosya çözülemez ve kayıt görüntüsüz
-			// çıkar; en azından günlükte iz kalsın.
-			if (veri[0] >> 6) != 0b10 {
-				w.log.Errorw("rawrec görüntü: VP9 GİBİ GÖRÜNMÜYOR, IVF yine de "+
-					"'VP90' etiketiyle yazılıyor ve muhtemelen ÇÖZÜLEMEYECEK",
-					nil, "ilk_bayt", fmt.Sprintf("0x%02x", veri[0]),
-					"frame_marker", veri[0]>>6)
+			// ⚠ KODEK GERÇEKTEN BU MU — SESSİZ BOZULMAYA KARŞI KORUMA.
+			// Kural kodeğe özgü (`Dogrula`, kodek.go). Yanlışsa dosya
+			// çözülemez ve kayıt görüntüsüz çıkar; en azından günlükte iz
+			// kalsın. Tarihçe: `0a767c2` (RED ayıklayıcısı videoya uygulanmıştı).
+			if ok, aciklama := w.kodek.Dogrula(veri); !ok {
+				w.log.Errorw("rawrec görüntü: "+w.kodek.Adi()+" GİBİ GÖRÜNMÜYOR, "+
+					"dosya yine de yazılıyor ve muhtemelen ÇÖZÜLEMEYECEK",
+					nil, "aciklama", aciklama, "ilk_bayt", fmt.Sprintf("0x%02x", veri[0]))
 			}
 			var err error
 			fh, yol, err = w.dosyaAç(h, dosyaSayacı)
@@ -650,7 +651,7 @@ func (w *VideoWriter) loop() {
 					Ayrinti: err.Error()}, w.log)
 				return
 			}
-			ivf = newIvfYazıcı(fh, w.en, w.boy)
+			kap = w.kodek.YeniKap(fh, w.en, w.boy)
 			ilkRTP = rtpTS
 			// Sender Report ARTIK BU KATMANDAN toplanacak: `first_rtp`
 			// buradan geldi (bkz. `dosyaKatmanı`).
@@ -791,7 +792,7 @@ func (w *VideoWriter) loop() {
 			kareGunluk = append(kareGunluk, kareOrnek{
 				K: suAnkiKatman, R: rtpTS, P: pts})
 		}
-		ivf.write(veri, uint64(pts))
+		kap.write(veri, uint64(pts), anahtarKare)
 		kare++
 		sagl.kareYazildi(geliş)
 		if anahtarKare {
@@ -1173,7 +1174,7 @@ func (w *VideoWriter) loop() {
 			// `hedefBelirle`). Bulunamazsa atılıyor — yazılan katman
 			// kesintisiz akmaya devam ediyor.
 			if p.katman != suAnkiKatman {
-				if p.katman != hedefKatman || !anahtarKareBaşlangıcı(p) {
+				if p.katman != hedefKatman || !w.kodek.AnahtarBaslangici(p) {
 					continue
 				}
 				katmanaGeç(hedefKatman, p.geliş)
@@ -1457,30 +1458,19 @@ const üstKatmanSusmaEşiği = 3 * time.Second
 // 24 fps × ~40 paket/kare × ~10 sn ≈ 10k. Paket ~1200 bayt → ~12 MB tavan.
 const videoBekleyenÜstSınır = 10000
 
-// anahtarKareBaşlangıcı — bu paket bir ANAHTAR KARENİN İLK parçası mı?
-//
-// Geçiş noktası tam olarak burasıdır: karenin ortasından geçilirse çözücü
-// görmediği bir görüntüye atıf yapan delta kareler alır. Kare TOPLANMIYOR,
-// yalnız VP9 başlığındaki B (kare başlangıcı) biti ile paketin anahtar kare
-// bayrağına bakılıyor — hedef katman için ayrı bir toplayıcı tutmaya gerek
-// kalmıyor (katmanların sıra numarası uzayları da ayrı, tek sıra tamponu
-// ikisini birden düzenleyemezdi).
-func anahtarKareBaşlangıcı(p vpaket) bool {
-	if !p.anahtar {
-		return false
-	}
-	var vp9 codecs.VP9Packet
-	if _, err := vp9.Unmarshal(p.payload); err != nil {
-		return false
-	}
-	return vp9.B
-}
+// Katman geçişinin noktası "anahtar karenin İLK parçası": karenin ortasından
+// geçilirse çözücü görmediği bir görüntüye atıf yapan delta kareler alır.
+// Kare TOPLANMIYOR, yalnız paketin anahtar kare bayrağı ile kodeğin kare
+// başlangıcı işaretine bakılıyor (`kodekAyiklayici.AnahtarBaslangici`) —
+// hedef katman için ayrı bir toplayıcı tutmaya gerek kalmıyor (katmanların
+// sıra numarası uzayları da ayrı, tek sıra tamponu ikisini birden
+// düzenleyemezdi).
 
 // işle — bir RTP paketini kare toplayıcıya ver; kare tamamlanınca yaz.
 //
-// VP9 payload descriptor'ı B (kare başlangıcı) ve E (kare sonu) bitlerini
-// taşıyor. Kare = B'den E'ye kadar olan paketlerin yüklerinin, başlıkları
-// soyulmuş hâlde ardışık birleşimi.
+// Kodek, paketten kare parçasını ve sınır bayraklarını veriyor (`Ayikla`:
+// VP9'da B/E bitleri, H.264'te damga değişimi + marker). Kare = `basla`dan
+// `bitir`e kadar olan paketlerin parçalarının ardışık birleşimi.
 func (w *VideoWriter) işle(p vpaket, kopuk bool, parça *[]byte, topluyor *bool,
 	parçaRTP *uint32, parçaAnahtar *bool, parçaBozuk *bool, sagl *saglik,
 	kareYaz func([]byte, uint32, bool, time.Time)) {
@@ -1496,22 +1486,21 @@ func (w *VideoWriter) işle(p vpaket, kopuk bool, parça *[]byte, topluyor *bool
 		*parça = (*parça)[:0]
 	}
 
-	var vp9 codecs.VP9Packet
-	veri, err := vp9.Unmarshal(p.payload)
+	veri, basla, bitir, err := w.kodek.Ayikla(p)
 	if err != nil || len(veri) == 0 {
 		// Çözülemeyen paket: içinde bulunduğu kareyi de bozar, toplamayı
-		// iptal et. Bir sonraki B bitinde temiz başlarız.
+		// iptal et. Bir sonraki kare başlangıcında temiz başlarız.
 		atla(true)
 		return
 	}
 
-	// Damga değiştiyse önceki kare bitmemiş demektir (E biti kaybolmuş ya da
-	// paket düşmüş) — yarım kareyi at, yenisine geç.
+	// Damga değiştiyse önceki kare bitmemiş demektir (kare sonu işareti
+	// kaybolmuş ya da paket düşmüş) — yarım kareyi at, yenisine geç.
 	if *topluyor && p.rtp != *parçaRTP {
 		atla(true)
 	}
 
-	if vp9.B {
+	if basla {
 		*topluyor = true
 		*parçaBozuk = false
 		*parça = (*parça)[:0]
@@ -1527,16 +1516,16 @@ func (w *VideoWriter) işle(p vpaket, kopuk bool, parça *[]byte, topluyor *bool
 		*parçaBozuk = true
 	}
 	if !*topluyor {
-		return // kare ortasından geldik, B bekliyoruz
+		return // kare ortasından geldik, kare başlangıcı bekliyoruz
 	}
 	*parça = append(*parça, veri...)
 	if p.anahtar {
 		*parçaAnahtar = true
 	}
 
-	// Kare sonu: E biti ya da marker. İkisi de aynı şeyi söylüyor ama
-	// yayıncılar birini boş bırakabiliyor; ikisine de bakıyoruz.
-	if vp9.E || p.marker {
+	// Kare sonu: kodeğin işareti (VP9'da E biti ya da marker — ikisi de aynı
+	// şeyi söylüyor ama yayıncılar birini boş bırakabiliyor).
+	if bitir {
 		if *parçaBozuk {
 			atla(true)
 			return
@@ -1551,8 +1540,10 @@ func (w *VideoWriter) dosyaAç(h *hedef, n int) (*os.File, string, error) {
 	if err := os.MkdirAll(d, 0o755); err != nil {
 		return nil, "", err
 	}
-	// "sfu_" öneki — gerekçe rawrec.go `dosyaAç`ta.
-	yol := filepath.Join(d, fmt.Sprintf("%02d_sfu_%s.ivf", n, string(w.trackID)))
+	// "sfu_" öneki — gerekçe rawrec.go `dosyaAç`ta. Uzantı kodekten
+	// (`.ivf` / `.ts`): postprocess kabı uzantıdan seçiyor.
+	yol := filepath.Join(d, fmt.Sprintf("%02d_sfu_%s%s", n, string(w.trackID),
+		w.kodek.Uzanti()))
 	fh, err := os.Create(yol)
 	if err != nil {
 		return nil, "", err

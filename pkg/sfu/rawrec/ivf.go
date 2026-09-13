@@ -22,18 +22,19 @@ const (
 	ivfKareSayısıOfs = 24
 )
 
-// ivfFourCC — VP9. Başka bir kodek bu etiketle yazılırsa dosya sözdizimsel
-// olarak geçerli görünür ama ÇÖZÜLEMEZ ("Invalid frame marker") ve kare
-// taraması sıfır kare bulur — kayıt sessizce görüntüsüz çıkar (kayıt 124 ve
-// 158 böyle bozuldu). Yazıcı bu yüzden yalnız VP9 için kuruluyor.
-var ivfFourCC = [4]byte{'V', 'P', '9', '0'}
+// IVF fourcc etiketleri. Yanlış etiketle yazılan dosya sözdizimsel olarak
+// geçerli görünür ama ÇÖZÜLEMEZ ("Invalid frame marker") ve kare taraması
+// sıfır kare bulur — kayıt sessizce görüntüsüz çıkar (kayıt 124 ve 158 böyle
+// bozuldu). Etiket bu yüzden kodekten geliyor (`kodekAyiklayici.YeniKap`),
+// yazıcı kendi başına seçmiyor.
+var ivfFourCCVP9 = [4]byte{'V', 'P', '9', '0'}
 
 type ivfYazıcı struct {
 	fh   *os.File
 	kare uint32
 }
 
-func newIvfYazıcı(fh *os.File, en, boy uint16) *ivfYazıcı {
+func newIvfYazıcı(fh *os.File, en, boy uint16, fourcc [4]byte) *ivfYazıcı {
 	// Genişlik/yükseklik BİLGİ AMAÇLI: gerçek boyut VP9 akışının içinde de
 	// var ve ders ortasında değişirse (öğretmen başka pencere paylaşırsa)
 	// ffmpeg akıştan okuyor. Sıfır olamaz, en az 2.
@@ -47,7 +48,7 @@ func newIvfYazıcı(fh *os.File, en, boy uint16) *ivfYazıcı {
 	b = append(b, 'D', 'K', 'I', 'F')
 	b = binary.LittleEndian.AppendUint16(b, 0)             // sürüm
 	b = binary.LittleEndian.AppendUint16(b, ivfBaşlıkBoyu) // başlık uzunluğu
-	b = append(b, ivfFourCC[:]...)
+	b = append(b, fourcc[:]...)
 	b = binary.LittleEndian.AppendUint16(b, en)
 	b = binary.LittleEndian.AppendUint16(b, boy)
 	b = binary.LittleEndian.AppendUint32(b, 90000) // zaman tabanı payda
@@ -59,7 +60,8 @@ func newIvfYazıcı(fh *os.File, en, boy uint16) *ivfYazıcı {
 }
 
 // write — bir kareyi kendi kaydıyla yazar: 4 bayt uzunluk + 8 bayt damga.
-func (v *ivfYazıcı) write(kare []byte, pts uint64) {
+// `anahtar` IVF'te kullanılmıyor (kap arayüzü için var).
+func (v *ivfYazıcı) write(kare []byte, pts uint64, anahtar bool) {
 	var h [12]byte
 	binary.LittleEndian.PutUint32(h[0:4], uint32(len(kare)))
 	binary.LittleEndian.PutUint64(h[4:12], pts)
