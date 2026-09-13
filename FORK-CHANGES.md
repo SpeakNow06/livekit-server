@@ -1064,8 +1064,9 @@ dosyası varsa bütün tarayıcı kopyaları atılır — o SFU dosyası mobil
 - Replay testi altın değeri değişmedi (yan JSON hash'e girmiyor); iki katman
   testi `sid`/`cid` alanlarını doğruluyor.
 
-**Image:** `ghcr.io/speaknow06/livekit-server:v1.11.0-rawrec37` (2026-09-13 gece,
-rawrec36'nın üstüne §27; compose `SN_RAWREC_WAIT=2`). Önceki: rawrec36 (23:00, §26).
+**Image:** `ghcr.io/speaknow06/livekit-server:v1.11.0-rawrec38` (2026-09-13 gece,
+rawrec36'nın üstüne §27+§28; compose `SN_RAWREC_WAIT=2`). Çalışan: rawrec36 (23:00, §26) —
+restart bekliyor. rawrec37 imajı atlandı (38 onu kapsıyor).
 
 ## 25. rawrec: KAYIT ÖNCESİ paketler dosyaya girmez (2026-09-13, kayıt 882)
 
@@ -1160,6 +1161,18 @@ neden tutalım ki?", "10 saniyelik biriktirmeye neden ihtiyaç kaldı?" — heps
   Aynı kural tarayıcı kopyasında (speaknow-server `share_transform_worker.js`):
   `enable` öncesi kuyruk tümden kaldırıldı, ilk anahtar kareye kadar kare yollanmıyor.
 - Test: `kesim_test.go` → `TestHedefBaslangic`. İmaj `v1.11.0-rawrec37`.
+
+## 28. rawrec/video.go: ilk anahtar kare gelene kadar PLI yinelenir (2026-09-13)
+
+Kullanıcı sorusu ortaya çıkardı: "2-30 sn'de bir yinelenen tam kare isteği ilk tam
+kareden önce de var mı?" — YOKTU. Hedef bulununca tek PLI atılıyor, düzenli bütçe
+(`kfEnÇokKare`/`kfEnAzSn`/`kfEnÇokSn`) yalnız dosya açıldıktan sonra çalışıyordu.
+PLI güvensiz (RTCP); kaybolursa ya da sabit ekranda kodlayıcı o an kare üretmezse
+dosya yayıncı kendiliğinden anahtar kare gönderene kadar açılmıyordu. Artık dosya
+açılana kadar 1 sn'de bir (10 yinelemeden sonra 5 sn'de bir) PLI yineleniyor
+(`ilkAnahtarPLIAraligi`, `ilkAnahtarPLIAraligiGec`); ticker bütçe kapalı olsa da
+sürüyor. Log: `rawrec görüntü: ilk anahtar kare bekleniyor, PLI yinelendi`
+(1-3, 5, 10, sonra her 12.). İmaj `v1.11.0-rawrec38` (rawrec37 + bu).
 
 ## Rebuild
 ```bash

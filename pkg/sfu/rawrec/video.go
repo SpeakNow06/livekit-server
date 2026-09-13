@@ -439,6 +439,10 @@ func (w *VideoWriter) loop() {
 		// sonAnahtarKare — son anahtar kare yazıldığındaki `kare` değeri.
 		// Bütçe KARE üstünden işliyor (gerekçe: rawrec.go, kfEnÇokKare).
 		sonAnahtarKare int
+		// sonPLI / pliYineleme — dosya açılana kadar PLI yinelemesi
+		// (rawrec38, bkz. ilkAnahtarPLIAraligi).
+		sonPLI      time.Time
+		pliYineleme int
 
 		// ÜST KATMAN SUSTU İZLEME (2026-09-03, kayıt 182).
 		// Yazıcı yalnız üst simulcast katmanına bağlı ve o katman ders
@@ -834,6 +838,33 @@ func (w *VideoWriter) loop() {
 		select {
 		case <-tik.C:
 			if h != nil {
+				// ── İLK ANAHTAR KARE HÂLÂ YOK: PLI'YI YİNELE (rawrec38) ──
+				// Hedefteki istek TEK ATIMLIKTI ve PLI güvensiz (RTCP);
+				// sabit ekranda kodlayıcı o an kare üretmemiş de olabilir.
+				// Kaybolursa dosya, yayıncı kendiliğinden anahtar kare
+				// gönderene kadar (dakikalar) açılmıyordu — kullanıcının
+				// sorusu ortaya çıkardı ("2-30 sn'lik yineleme ilk kareden
+				// önce de var mı?" — yoktu). Dosya açılınca aşağıdaki bütçe
+				// düzeni devralıyor. Susturulmuş/duraklamış paylaşımda
+				// sonsuza dek 1 sn'de bir istememek için 10 yinelemeden
+				// sonra 5 sn'ye seyreltiliyor; log sel olmasın diye seyrek.
+				if !vazgeç && fh == nil && !sonPLI.IsZero() {
+					aralik := ilkAnahtarPLIAraligi
+					if pliYineleme >= 10 {
+						aralik = ilkAnahtarPLIAraligiGec
+					}
+					if time.Since(sonPLI) >= aralik {
+						w.kaynak(suAnkiKatman).SendPLI(true)
+						sonPLI = time.Now()
+						pliYineleme++
+						if pliYineleme <= 3 || pliYineleme == 5 || pliYineleme == 10 ||
+							pliYineleme%12 == 0 {
+							w.log.Infow("rawrec görüntü: ilk anahtar kare bekleniyor, PLI yinelendi",
+								"track", w.trackID, "sid", w.sid, "yineleme", pliYineleme,
+								"katman", suAnkiKatman, "kaynak", kaynakAdı(w.trackInfo))
+						}
+					}
+				}
 				// ── DÜZENLİ ANAHTAR KARE ─────────────────────────────
 				// Yalnız GEREKİYORSA istiyoruz: aralık boyunca zaten bir
 				// anahtar kare yazıldıysa (yayıncı kendi gönderdi, ya da
@@ -1115,15 +1146,14 @@ func (w *VideoWriter) loop() {
 			// bütçe hareketli içerikte saniyeler değil kareler içinde
 			// dolabiliyor. Ticker'ı bütçe periyoduna bağlamak isteği
 			// geciktirirdi.
-			if kfEnÇokKare > 0 || kfEnÇokSn > 0 {
-				tik.Reset(anahtarKareYoklama)
-			} else {
-				tik.Stop()
-			}
+			// Ticker HER DURUMDA sürüyor (rawrec38): bütçe kapalı olsa bile
+			// ilk anahtar kare gelene kadar PLI yinelenmeli (tick dalında).
+			tik.Reset(anahtarKareYoklama)
 			// ANAHTAR KARE İSTE. Dosya ancak anahtar kareyle açılabiliyor ve
 			// ekran paylaşımında anahtar kare çok seyrek — sabit ekranda
 			// dakikalarca gelmeyebilir. Hedefi yeni öğrendiysek beklemeyelim.
 			w.kaynak(suAnkiKatman).SendPLI(true)
+			sonPLI = time.Now()
 			// Bekleyeni sırayla işle, sonra normal akışa geç.
 			kuyruk := bekleyen
 			bekleyen = nil
@@ -1263,6 +1293,12 @@ func (w *VideoWriter) loop() {
 // sıklığı bu değil (bkz. kfEnAzSn); bu yalnız kararın ne kadar çabuk
 // verildiğini belirliyor.
 const anahtarKareYoklama = 500 * time.Millisecond
+
+// ilkAnahtarPLIAraligi — dosya henüz açılmamışken (ilk anahtar kare gelmedi)
+// PLI bu aralıkla YİNELENİR (rawrec38); 10 yinelemeden sonra
+// `ilkAnahtarPLIAraligiGec`. Gerekçe: video.go tick dalı.
+const ilkAnahtarPLIAraligi = 1 * time.Second
+const ilkAnahtarPLIAraligiGec = 5 * time.Second
 
 // ── KATMAN TAKİBİ (2026-09-04) ─────────────────────────────────────────────
 //
