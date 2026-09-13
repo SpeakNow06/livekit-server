@@ -1076,21 +1076,21 @@ func (w *VideoWriter) loop() {
 			h = hedefAra(w.sid, w.log)
 			if h == nil {
 				// ⚠ KALICI VAZGEÇME YOK (kayıt 177) ve TAMPON BIRAKILMIYOR
-				// (kayıt 883, rawrec36) — gerekçe rawrec.go `waitFor` ve
-				// tampon.go. Redis notu (Aşama 0): 870-872'de kamera tam bu
-				// yoldan sessizce tarayıcı yedeğine düşmüştü; hedef sonradan
+				// (kayıt 883, rawrec36), yoklama yavaşlamıyor (rawrec37) —
+				// gerekçe rawrec.go `waitFor`/`hedefYokNotuSonra` ve tampon.go.
+				// Redis notu (Aşama 0): 870-872'de kamera tam bu yoldan
+				// sessizce tarayıcı yedeğine düşmüştü; hedef sonradan
 				// bulunursa not siliniyor.
-				if !pencereUyarildi && time.Since(ilkPaketAn) > waitFor {
+				if !pencereUyarildi && time.Since(ilkPaketAn) > hedefYokNotuSonra {
 					pencereUyarildi = true
 					w.log.Infow("rawrec görüntü hedef henüz yok, kayan tampon sürüyor",
 						"track", w.trackID, "sid", w.sid, "pencere", waitFor,
 						"bekleyen_paket", len(bekleyen),
 						"kaynak", kaynakAdı(w.trackInfo))
-					tik.Reset(geçAramaAralığı)
 					geriDususYaz(w.sid, geriDusus{Neden: "hedef-yok",
 						Kaynak: kaynakAdı(w.trackInfo), Track: string(w.trackID),
 						Ayrinti: fmt.Sprintf("%s içinde kayıt anahtarı bulunamadı, "+
-							"arama sürüyor (son %s tamponda)", waitFor, waitFor)}, w.log)
+							"arama sürüyor (son %s tamponda)", hedefYokNotuSonra, waitFor)}, w.log)
 				}
 				continue
 			}
@@ -1127,10 +1127,11 @@ func (w *VideoWriter) loop() {
 			// Bekleyeni sırayla işle, sonra normal akışa geç.
 			kuyruk := bekleyen
 			bekleyen = nil
-			// KAYIT ÖNCESİNİ ATMA (bkz. hedef.kesim, rawrec.go): başlangıçtan
-			// önceki paketler dosyaya girmez. Dosya zaten ilk anahtar kareyle
-			// açılıyor; yukarıdaki PLI o kareyi hemen getirir.
-			if kesim := h.kesim(); !kesim.IsZero() {
+			// KAYIT ÖNCESİNİ ATMA (bkz. hedef.baslangic, rawrec.go): düğmeden
+			// önceki paketler dosyaya girmez; dosya düğmeden SONRAKİ ilk anahtar
+			// kareyle açılır, yukarıdaki PLI o kareyi hemen getirir (tarayıcı
+			// kopyasında da aynı kural: share_transform_worker.js `started`).
+			if kesim := h.baslangic(); !kesim.IsZero() {
 				tutulan := kuyruk[:0:0]
 				for _, b := range kuyruk {
 					if !b.geliş.Before(kesim) {

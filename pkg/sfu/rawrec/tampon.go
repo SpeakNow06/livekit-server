@@ -20,20 +20,21 @@ import "time"
 // Kullanıcı kararı: "60 saniyeyi 10'a düşür; kayıt düğmesine bastığım andan
 // itibaren yazsın". YENİ düzen:
 //
-//   - Tampon KAYAN PENCERE: yalnız son `waitFor` (10 sn) tutulur, eskisi paket
-//     geldikçe atılır. Bellek sabit, arama süresi sınırsız (kayıt 177 kuralı:
-//     kalıcı vazgeçme yok).
-//   - Hedef bulununca kesimden (başlangıç − ön pay, rawrec35) eski olanlar
-//     atılır; dosya kayıt anıyla başlar. Görüntüde hedef bulunur bulunmaz PLI
+//   - Tampon KAYAN PENCERE: yalnız son `waitFor` (2 sn, rawrec37) tutulur,
+//     eskisi paket geldikçe atılır. Tek işi düğme ile yazıcının anahtarı
+//     görmesi (300 ms'de bir yoklama) arasındaki paketleri kaybetmemek.
+//     Bellek sabit, arama süresi sınırsız (kayıt 177: kalıcı vazgeçme yok).
+//   - Hedef bulununca düğmeden (hedef.baslangic; ön pay yok) eski olanlar
+//     atılır; dosya düğme anıyla başlar. Görüntüde hedef bulunur bulunmaz PLI
 //     ile tam kare isteniyor, sonra 4 sn'de bir sürüyor (video.go).
 //   - "Eksik" damgası YALNIZ kaydın içinden paket atıldıysa: pencereden taşan
 //     EN YENİ paket kayıt başlangıcından SONRA geldiyse dosya kaydın başını
 //     kaçırmıştır (`saglik.kayanTamponSonucu`). Bu ancak anahtar, kayıt
 //     başladıktan ~8 sn sonra görülürse olur — gerçek bir arıza.
-//   - `waitFor` dolunca yalnız yoklama seyreltiliyor (`geçAramaAralığı`) ve
-//     Redis'e "hedef-yok" notu düşüyor; hedef sonradan bulunursa not
-//     SİLİNİYOR (`geriDususSil`) — 883'te `kaynak_uyari` bu bayat notla "SFU
-//     kayıt anahtarını bulamadı" demişti.
+//   - `hedefYokNotuSonra` (10 sn) dolunca Redis'e "hedef-yok" notu düşüyor
+//     (yoklama yavaşlamıyor); hedef sonradan bulunursa not SİLİNİYOR
+//     (`geriDususSil`) — 883'te `kaynak_uyari` bu bayat notla "SFU kayıt
+//     anahtarını bulamadı" demişti.
 //
 // Yardımcılar ses (`paket`) ve görüntü (`vpaket`) için ortak; geliş anını
 // çağıran veriyor.

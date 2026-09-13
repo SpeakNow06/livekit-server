@@ -5,40 +5,37 @@ import (
 	"time"
 )
 
-// Kayıt öncesi kesim: anahtar başlangıcı taşıyorsa kesim = başlangıç − ön pay;
-// taşımıyorsa sıfır (kesme yok). Sağlık tabanı kesime çekilir, atılan süre raporlanır.
-func TestHedefKesim(t *testing.T) {
-	eski := onRol
-	onRol = 2 * time.Second
-	defer func() { onRol = eski }()
-
+// Kayıt öncesi kesim = düğmenin anı (ön pay yok, rawrec37): anahtar başlangıcı
+// taşıyorsa o an, taşımıyorsa sıfır (kesme yok). Sağlık tabanı kesime çekilir,
+// atılan süre raporlanır.
+func TestHedefBaslangic(t *testing.T) {
 	var yok *hedef
-	if !yok.kesim().IsZero() {
-		t.Fatal("nil hedefte kesim sıfır olmalı")
+	if !yok.baslangic().IsZero() {
+		t.Fatal("nil hedefte başlangıç sıfır olmalı")
 	}
-	if !(&hedef{RecordingID: 1, Dir: "/x"}).kesim().IsZero() {
-		t.Fatal("baslangic_ms yoksa kesim sıfır olmalı (eski davranış)")
+	if !(&hedef{RecordingID: 1, Dir: "/x"}).baslangic().IsZero() {
+		t.Fatal("baslangic_ms yoksa sıfır olmalı (eski anahtar: kesme yok)")
 	}
 	bas := time.Date(2026, 9, 13, 13, 34, 37, 0, time.UTC)
 	h := &hedef{RecordingID: 882, Dir: "/x", BaslangicMs: bas.UnixMilli()}
-	if k := h.kesim(); !k.Equal(bas.Add(-2 * time.Second)) {
-		t.Fatalf("kesim = %v, beklenen %v", k, bas.Add(-2*time.Second))
+	if k := h.baslangic(); !k.Equal(bas) {
+		t.Fatalf("başlangıç = %v, beklenen %v (ön pay olmamalı)", k, bas)
 	}
 
 	s := yeniSaglik()
 	s.baslangic = bas.Add(-57 * time.Second) // yazıcı 57 sn önce kuruldu (paylaşım önce açıldı)
-	s.kesimUygulandi(h.kesim())
-	if !s.baslangic.Equal(bas.Add(-2 * time.Second)) {
+	s.kesimUygulandi(h.baslangic())
+	if !s.baslangic.Equal(bas) {
 		t.Fatalf("sağlık tabanı kesime çekilmedi: %v", s.baslangic)
 	}
 	r := s.rapor()
-	if v, _ := r["kayit_oncesi_atilan_sn"].(float64); v < 54.9 || v > 55.1 {
-		t.Fatalf("kayit_oncesi_atilan_sn = %v, beklenen ~55", r["kayit_oncesi_atilan_sn"])
+	if v, _ := r["kayit_oncesi_atilan_sn"].(float64); v < 56.9 || v > 57.1 {
+		t.Fatalf("kayit_oncesi_atilan_sn = %v, beklenen ~57", r["kayit_oncesi_atilan_sn"])
 	}
 	// Kesim tabandan eskiyse (kayıt tampondan önce başladı) taban değişmez.
 	s2 := yeniSaglik()
 	s2.baslangic = bas.Add(10 * time.Second)
-	s2.kesimUygulandi(h.kesim())
+	s2.kesimUygulandi(h.baslangic())
 	if !s2.baslangic.Equal(bas.Add(10 * time.Second)) {
 		t.Fatal("kesim tabandan eskiyken taban değişmemeli")
 	}

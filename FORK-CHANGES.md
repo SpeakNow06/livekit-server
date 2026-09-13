@@ -1064,8 +1064,8 @@ dosyası varsa bütün tarayıcı kopyaları atılır — o SFU dosyası mobil
 - Replay testi altın değeri değişmedi (yan JSON hash'e girmiyor); iki katman
   testi `sid`/`cid` alanlarını doğruluyor.
 
-**Image:** `ghcr.io/speaknow06/livekit-server:v1.11.0-rawrec36` (2026-09-13 23:00,
-rawrec35'in üstüne §26; compose `SN_RAWREC_WAIT=10`).
+**Image:** `ghcr.io/speaknow06/livekit-server:v1.11.0-rawrec37` (2026-09-13 gece,
+rawrec36'nın üstüne §27; compose `SN_RAWREC_WAIT=2`). Önceki: rawrec36 (23:00, §26).
 
 ## 25. rawrec: KAYIT ÖNCESİ paketler dosyaya girmez (2026-09-13, kayıt 882)
 
@@ -1139,6 +1139,27 @@ itibaren yazsın (§25 kesimi aynen); eksik yalnız gerçekten kayıp varsa."
 Test: `tampon_test.go` (pencere/üst sınır kırpma; "eksik" yalnız kayıt içi
 taşmada). Prod compose: `SN_RAWREC_WAIT=60` → `10` (etiketle birlikte
 değiştirilecek; ortam değişkeni varsayılanı EZER).
+
+## 27. rawrec: ÖN PAY YOK, pencere 2 sn, yoklama yavaşlamıyor — kayıt düğme anından, ilk anahtar kareden başlar (2026-09-13)
+
+Kullanıcı soruları: "kuyruktaki son anahtar kare düğmeden 8 sn önceyse? düğmeden
+sonraki ilk kareyle başlaması daha doğru olmaz mı?", "ses için 2 saniye ön payı
+neden tutalım ki?", "10 saniyelik biriktirmeye neden ihtiyaç kaldı?" — hepsi haklı.
+
+- **Ön pay kalktı:** `hedef.kesim()` ve `SN_RAWREC_ONROL_SN` silindi; ses de görüntü
+  de `hedef.baslangic()` (düğmenin anı) ile kesiliyor. Anahtar düğmeyle aynı anda,
+  aynı makinede yazılıyor; ön payın gerekçesi yoktu.
+- **Pencere 10 → 2 sn** (`SN_RAWREC_WAIT` varsayılanı; prod compose `=2`): tamponun
+  tek işi düğme ile yazıcının anahtarı GÖRMESİ (300 ms'de bir yoklama) arasındaki
+  paketleri kaybetmemek. Kesim düğmenin kendisi olduğu için bu pencereden dosyaya
+  kayıt öncesi hiçbir şey girmez. Bellek: ses ≈ 9 KB, görüntü ≈ 0,5 MB.
+- **Yoklama hiç yavaşlamıyor:** `geçAramaAralığı` (10 sn sonra 2 sn'ye düşme)
+  silindi — pencereyi büyütmek zorunda bırakıyordu. `hedefYokNotuSonra` (10 sn)
+  yalnız Redis "hedef-yok" tanı notunun zamanı. Redis bedeli track başına 3 GET/sn.
+- Görüntüde dosya düğmeden SONRAKİ ilk anahtar kareyle açılır (hedefte PLI, ~0,5 sn).
+  Aynı kural tarayıcı kopyasında (speaknow-server `share_transform_worker.js`):
+  `enable` öncesi kuyruk tümden kaldırıldı, ilk anahtar kareye kadar kare yollanmıyor.
+- Test: `kesim_test.go` → `TestHedefBaslangic`. İmaj `v1.11.0-rawrec37`.
 
 ## Rebuild
 ```bash

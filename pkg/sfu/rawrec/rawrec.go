@@ -91,18 +91,19 @@ const chanBuf = 2048
 // Kontrol anahtarı yoklama aralığı. İlk paketten sonra bu sıklıkta bakılıyor.
 const lookupEvery = 300 * time.Millisecond
 
-// geçAramaAralığı — `waitFor` dolduktan SONRAKİ yoklama sıklığı. Anahtar bu
-// kadar gecikmişse acele yok: kayan tampon son `waitFor`ı zaten tutuyor ve
-// 2 sn'lik yoklama gecikmesi ön payın (`onRol`) + pencerenin içinde kalıyor.
-// Redis'i boşuna yormayalım.
-const geçAramaAralığı = 2 * time.Second
+// hedefYokNotuSonra — ilk paketten bu kadar sonra hedef hâlâ yoksa Redis'e
+// "hedef-yok" notu düşülür (tanı; hedef sonradan bulunursa silinir).
+// YOKLAMA SIKLIĞI DEĞİŞMİYOR (rawrec37): `lookupEvery` track boyunca sürüyor.
+// Eskiden burada yoklama 2 sn'ye yavaşlatılıyordu; o zaman tampon penceresi de
+// o gecikmeyi karşılayacak kadar büyük tutulmak zorundaydı. Redis bedeli
+// track başına ~3 GET/sn — önemsiz.
+const hedefYokNotuSonra = 10 * time.Second
 
 var (
 	once    sync.Once
 	enabled bool
 	rdb     *redis.Client
 	waitFor time.Duration
-	onRol   time.Duration
 	// ⚠ errLogged BURADA DEĞİL — yazıcı başına (kayıt 178'de öğrenildi).
 	// Paket düzeyinde tekken SÜREÇ BOYUNCA tek satır yazılıyordu: ses
 	// yazıcısının "dosya açılamadı" hatası logu tüketti ve VİDEO yazıcısının
@@ -182,15 +183,16 @@ func initOnce() {
 	//
 	// 60'ın gerekçesi de kalmadı: kayıt 169'daki 17 sn'lik "DB satırı geç
 	// yazıldı" gecikmesi, oda anahtarının satır oluşur oluşmaz (robot
-	// girmeden, `baslangic_ms` ile) yazılmasıyla kapandı; yazıcı 300 ms'de
-	// bir bakıyor, anahtar tipik olarak 1 sn içinde görülüyor. 10 sn bunun
-	// onlarca katı; ön pay (`onRol`, 2 sn) da pencerenin içinde.
-	// Bellek: ses 10 sn × 50 paket × ~90 B ≈ 45 KB; görüntüde ayrıca
-	// `videoBekleyenÜstSınır` freni var.
-	waitFor = time.Duration(envInt("SN_RAWREC_WAIT", 10)) * time.Second
-	// Kayıt başlangıcından bu kadar öncesi tutulur (anahtar birkaç yüz ms geç
-	// görülebiliyor; görüntüde zaten ilk anahtar kareden başlanıyor).
-	onRol = time.Duration(envInt("SN_RAWREC_ONROL_SN", 2)) * time.Second
+	// girmeden, `baslangic_ms` ile) yazılmasıyla kapandı.
+	//
+	// PENCERE NEDEN 2 SN (rawrec37, kullanıcı: "10 saniyelik biriktirmeye
+	// neden ihtiyaç kaldı?"): tamponun TEK işi, düğmeye basılmasıyla
+	// yazıcının anahtarı GÖRMESİ arasındaki paketleri kaybetmemek. Yoklama
+	// 300 ms'de bir ve hiç yavaşlamıyor; 2 sn bunun 6-7 katı. Kesim düğmenin
+	// kendisi olduğu için bu pencereden dosyaya kayıt öncesi HİÇBİR ŞEY
+	// girmez (ses ve görüntüde aynı kural, bkz. hedef.baslangic). Bellek:
+	// ses 2 sn × 50 paket × ~90 B ≈ 9 KB; görüntü ≈ 0,5 MB.
+	waitFor = time.Duration(envInt("SN_RAWREC_WAIT", 2)) * time.Second
 	pinHigh = envOr("SN_RAWREC_PIN_HIGH", "1") != "0"
 	kfEnÇokKare = envInt("SN_RAWREC_KEYFRAME_MAX_KARE", 24)
 	kfEnAzSn = time.Duration(envInt("SN_RAWREC_KEYFRAME_MIN_SN", 2)) * time.Second
@@ -243,23 +245,21 @@ type hedef struct {
 	BaslangicMs int64 `json:"baslangic_ms,omitempty"`
 }
 
-// kesim — kayıt ÖNCESİ paketlerin atılacağı an: başlangıç − ön pay. Başlangıç
-// bilinmiyorsa sıfır zaman (= kesme yok).
+// baslangic — kayıt düğmesine basıldığı an (anahtar taşıyorsa), yoksa sıfır
+// zaman (= kesme yok, eski anahtar). Bundan ESKİ hiçbir paket dosyaya girmez;
+// ses de görüntü de buradan başlar.
 //
 // NEDEN (kayıt 882): yazıcı hedefi beklerken biriktirdiği HER paketi dosyaya
 // yazıyordu. Paylaşım kayıttan 57 sn önce açılınca dosyanın başına 57 sn'lik,
 // anahtar karesiz tek bir parça (10,8 MB) oturdu; kaydın ilk saniyesi o parçanın
 // sonuna düştüğü için tarayıcı başa her dönüşte 10,8 MB indirip 550 kare çözdü
-// (68 aralık isteği, hızlı hatta 18 sn, kullanıcıda ~60 sn). Tampon "anahtar geç
-// gelirse" sigortasıdır; kayıt öncesinin dosyaya girmesi için sebep yok.
-func (h *hedef) kesim() time.Time {
-	if h == nil || h.BaslangicMs <= 0 {
-		return time.Time{}
-	}
-	return time.UnixMilli(h.BaslangicMs).Add(-onRol)
-}
-
-// baslangic — kayıt düğmesine basıldığı an (anahtar taşıyorsa), yoksa sıfır.
+// (68 aralık isteği, hızlı hatta 18 sn, kullanıcıda ~60 sn).
+//
+// ÖN PAY YOK (rawrec37; rawrec35-36'da 2 sn vardı, `SN_RAWREC_ONROL_SN`).
+// Kullanıcı: "ses için 2 saniye ön payı neden tutalım ki?" — gerekçesi
+// yoktu: anahtar düğmeyle aynı anda, aynı makinede yazılıyor; düğme ile
+// yazıcının anahtarı görmesi arasındaki paketleri zaten kayan tampon tutuyor
+// (`waitFor`). Kayıt düğmenin anından başlar, bu kadar.
 func (h *hedef) baslangic() time.Time {
 	if h == nil || h.BaslangicMs <= 0 {
 		return time.Time{}
@@ -509,22 +509,21 @@ func (w *Writer) loop() {
 				// saniye sonra yazıldı ve birinci paylaşım hiç kaydedilmedi.
 				// Arama track boyunca sürüyor.
 				// ⚠ TAMPON DA BIRAKILMIYOR (2026-09-13, kayıt 883 — rawrec36):
-				// tampon zaten kayan pencere (bkz. tampon.go). `waitFor`
-				// dolunca yalnız yoklama seyreltiliyor ve Redis'e "hedef-yok"
-				// notu düşüyor (hedef sonradan bulunursa siliniyor). Eskiden
-				// burada tampon atılıp dosya "eksik" damgalanıyordu — gerekçe
-				// `waitFor` başlığında.
-				if !pencereUyarildi && time.Since(ilkPaketAn) > waitFor {
+				// tampon zaten kayan pencere (bkz. tampon.go); yoklama hiç
+				// yavaşlamıyor (rawrec37). `hedefYokNotuSonra` dolunca yalnız
+				// Redis'e "hedef-yok" notu düşüyor (hedef sonradan bulunursa
+				// siliniyor). Eskiden burada tampon atılıp dosya "eksik"
+				// damgalanıyordu — gerekçe `waitFor` başlığında.
+				if !pencereUyarildi && time.Since(ilkPaketAn) > hedefYokNotuSonra {
 					pencereUyarildi = true
 					w.log.Infow("rawrec hedef henüz yok, kayan tampon sürüyor",
 						"track", w.trackID, "sid", w.sid,
 						"pencere", waitFor, "bekleyen_paket", len(bekleyen),
 						"kaynak", kaynakAdı(w.trackInfo))
-					tik.Reset(geçAramaAralığı)
 					geriDususYaz(w.sid, geriDusus{Neden: "hedef-yok",
 						Kaynak: kaynakAdı(w.trackInfo), Track: string(w.trackID),
 						Ayrinti: fmt.Sprintf("%s içinde kayıt anahtarı bulunamadı, "+
-							"arama sürüyor (son %s tamponda)", waitFor, waitFor)}, w.log)
+							"arama sürüyor (son %s tamponda)", hedefYokNotuSonra, waitFor)}, w.log)
 				}
 				continue
 			}
@@ -569,10 +568,10 @@ func (w *Writer) loop() {
 				// dosya kesimden sonraki ilk paketten başlıyor, çapa da ona
 				// göre kuruluyor.
 				bekleyen = append(bekleyen, p)
-				// KAYIT ÖNCESİNİ ATMA (bkz. hedef.kesim): başlangıçtan önceki
+				// KAYIT ÖNCESİNİ ATMA (bkz. hedef.baslangic): düğmeden önceki
 				// paketler dosyaya girmez. Sağlık tabanı da kesime çekilir ki
 				// "akış ömrünün yarısından azı yazıldı" kararı bozulmasın.
-				if kesim := h.kesim(); !kesim.IsZero() {
+				if kesim := h.baslangic(); !kesim.IsZero() {
 					tutulan := bekleyen[:0:0]
 					for _, b := range bekleyen {
 						if !b.geliş.Before(kesim) {
