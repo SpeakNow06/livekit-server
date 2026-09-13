@@ -1064,8 +1064,8 @@ dosyası varsa bütün tarayıcı kopyaları atılır — o SFU dosyası mobil
 - Replay testi altın değeri değişmedi (yan JSON hash'e girmiyor); iki katman
   testi `sid`/`cid` alanlarını doğruluyor.
 
-**Image:** `ghcr.io/speaknow06/livekit-server:v1.11.0-rawrec39` (2026-09-14 00:4x, §29 VP8+AV1;
-rawrec38'in üstüne; compose `SN_RAWREC_WAIT=2`).
+**Image:** çalışan `v1.11.0-rawrec39` (2026-09-14 00:4x, §29). `v1.11.0-rawrec40` (§30: yoklama
+200 ms) derleniyor, ders yokken geçilecek; compose `SN_RAWREC_WAIT=2`.
 
 ## 25. rawrec: KAYIT ÖNCESİ paketler dosyaya girmez (2026-09-13, kayıt 882)
 
@@ -1197,6 +1197,12 @@ etiketiyle yazıldığı için çözülemiyordu (0/33 ve 0/60 kare).
   (`c`), share-ws fourcc'yi codec'e göre seçiyor (VP80/VP90/AV01), `ivf_kare`
   anahtar kare tespiti fourcc'ye göre, sınıf `?vcodec=vp8|vp9|av1|h264` test
   parametresi. İmaj `v1.11.0-rawrec39`.
+
+## 30. rawrec: kontrol anahtarı yoklaması 300 → 200 ms (2026-09-14)
+
+Kullanıcı isteği. `lookupEvery` 200 ms; düğme ile "anahtarı gördüm" arasındaki
+gecikme en çok 200 ms (PLI o kadar erken çıkar). Redis bedeli track başına 5 GET/sn.
+İmaj `v1.11.0-rawrec40` (rawrec39 + bu).
 
 ## Rebuild
 ```bash

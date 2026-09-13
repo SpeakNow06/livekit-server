@@ -89,7 +89,10 @@ const ntpUnixOffset = 2208988800
 const chanBuf = 2048
 
 // Kontrol anahtarı yoklama aralığı. İlk paketten sonra bu sıklıkta bakılıyor.
-const lookupEvery = 300 * time.Millisecond
+// 300 → 200 ms (2026-09-14, rawrec40, kullanıcı isteği): düğme ile yazıcının
+// anahtarı görmesi arasındaki gecikme en çok 200 ms; Redis bedeli track başına
+// 5 GET/sn. Kayan pencere (`waitFor`, 2 sn) bunun 10 katı.
+const lookupEvery = 200 * time.Millisecond
 
 // hedefYokNotuSonra — ilk paketten bu kadar sonra hedef hâlâ yoksa Redis'e
 // "hedef-yok" notu düşülür (tanı; hedef sonradan bulunursa silinir).
