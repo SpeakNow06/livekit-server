@@ -325,6 +325,10 @@ func (y *yayinci) dur(ms int) {
 	y.wallNs += int64(ms) * int64(time.Millisecond)
 }
 
+// rtpAtla — RTP sayacı duvar ilerlemeden ileri sıçrar (yayıncı sayacı
+// duvar saatine yeniden tabanlıyor; eksik/fazla sıçrama = kare hatası).
+func (y *yayinci) rtpAtla(ms int) { y.rtp += uint32(ms * 48) }
+
 func (y *yayinci) srEkle(k *sahteSesKaynak) { k.srEkle(y.rtp, y.wallNs) }
 
 // sesKos — diziyi yeni bir yazıcıya besler, çıktıyı ve yan JSON'u döner.
@@ -1459,5 +1463,40 @@ func TestSesYakalamaSaatiBayatDamgaKayip(t *testing.T) {
 	}
 	if enB > 0.002 || oz["durum"] != "tutarli" {
 		t.Fatalf("sapma %.4f sn / oz=%v", enB, oz)
+	}
+}
+
+// TestSesYakalamaSaatiKucukAdim — iOS uygulaması modeli (kayıt 927): susturmada
+// paket yok, açılışta yayıncı RTP'yi duvar saatine yeniden tabanlıyor ama BİR
+// KARE (20 ms) eksik → varış "durmadı" der (fark 20 ms, titreme içinde), RTP'ye
+// göre yer 20 ms erken kalır. Damga (seyrek, ~1/sn) bu basamağı görür: bölüm
+// "act", sapma 0. Eski 100 ms eşiği görmüyordu (Firefox'ta damgasız, açık).
+func TestSesYakalamaSaatiKucukAdim(t *testing.T) {
+	k := &sahteSesKaynak{}
+	y := yeniYayinci(t0(), 500_000)
+	y.act = true
+	y.actHer = 50
+	d := dizi(k, y, 800, 100, func(i int, y *yayinci) bool {
+		if i == 400 {
+			y.dur(12000)
+			y.rtpAtla(12000 - 20) // duvar 12,000 sn ileri, RTP 11,980 sn: bir kare eksik
+			return true
+		}
+		return false
+	})
+	d[400].yak = d[400].gelis.UnixNano() - 40*int64(time.Millisecond) - 3*int64(time.Hour) // açılış paketi damgalı
+	pk, yan := sesKos(t, k, d)
+	enB, at := enBuyukSapma(t, pk, y.dogru)
+	oz := ozDenetim(t, yan)
+	bl := bolumler(t, yan)
+	t.Logf("küçük adım: sapma %.4f (paket %d) oz=%v bl=%v", enB, at, oz, bl)
+	if len(bl) != 2 || bl[1]["kaynak"] != "act" || bl[1]["kesin"] != true {
+		t.Fatalf("20 ms'lik kare hatası damgayla bölüm açmalıydı: %v", bl)
+	}
+	if e := bl[1]["sr_eksik_sn"].(float64); math.Abs(e-0.020) > 0.002 {
+		t.Fatalf("ölçülen eksik %.4f, beklenen 0,020", e)
+	}
+	if enB > 0.002 || oz["durum"] != "tutarli" {
+		t.Fatalf("sapma %.4f / oz=%v", enB, oz)
 	}
 }

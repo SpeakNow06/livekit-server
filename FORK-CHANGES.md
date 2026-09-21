@@ -1359,6 +1359,14 @@ geçemezdi). Sahte SR kaynağı artık yazıcıya İTİYOR (`ilet`, RTCP okuyucu
   (çapaları SR yerine damgadan kurmak).
 İmaj `v1.11.0-rawrec50`.
 
+## 39. rawrec51: damga eşiği 100 → 10 ms (iOS açılış basamağı, kayıt 927) (2026-09-21)
+- iOS uygulaması (react-native, libwebrtc) susturmada paket kesiyor, açılışta RTP'yi duvar saatine yeniden
+  tabanlıyor ama BİR KARE (20 ms) eksik: damga serisi +20 ms basamak. Varış kuralı bunu göremez (titreme
+  payı içinde), 100 ms damga eşiği de görmüyordu. Damga gürültüsü ±1 ms (Chrome enterpolasyon hatası > 1 ms
+  olunca yeni damga; çözünürlük 1 ms) → `actEsik = 10 ms` güvenli. Test `TestSesYakalamaSaatiKucukAdim`
+  (`yayinci.rtpAtla`). Firefox'taki aynı basamak damgasız → orada açık.
+İmaj `v1.11.0-rawrec51`, iki sunucuda.
+
 ## Rebuild
 ```bash
 cd livekit-server-source            # bu repo, branch speaknow-vp9-simulcast

@@ -143,9 +143,14 @@ type sesSaat struct {
 	paketSayisi int       // yedek dışı toplam paket
 }
 
-// actEsik — yakalama saatiyle ölçülen eksik bunu aşarsa bölüm açılır.
-// Yakalama saatinde titreme yok; 5 paketlik pay, ölçüm gürültüsüne karşı.
-const actEsik = 100 * time.Millisecond
+// actEsik — damgayla ölçülen fark bunu aşarsa bölüm açılır (ya da geçici
+// bölüm kesinleşir). Damgada ağ titremesi yok; ölçülen gürültü ±1 ms (Chrome
+// enterpolasyon hatası > 1 ms olunca yeni damga yollar, damga çözünürlüğü
+// 1 ms). 100 ms → 10 ms (rawrec51, kayıt 927): iOS uygulaması açılışta RTP'yi
+// duvar saatine yeniden tabanlıyor ama bir kare (20 ms) eksik — damga serisi
+// +20 ms basamak gösterdi, 100 ms eşiği bunu görmüyordu. Firefox'ta (923)
+// aynı basamak var ama damga yok → orada yakalanamıyor.
+const actEsik = 10 * time.Millisecond
 
 func yeniSesSaat(hz uint32) *sesSaat {
 	return &sesSaat{hz: int64(hz)}
