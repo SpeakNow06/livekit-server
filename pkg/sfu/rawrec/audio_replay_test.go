@@ -1108,15 +1108,16 @@ func TestSesSusturmaIciSRAtilir(t *testing.T) {
 	if srGunlugu(t, yan) != 5 {
 		t.Fatalf("günlükte yalnız gerçek SR'lar olmalı (5): %d", srGunlugu(t, yan))
 	}
-	// TEŞHİS (rawrec46): bölümün ilk 16 paketi [varış ms, rtp ms] — burada
-	// düzgün akış: ilk [0,0], sonrakiler 20 ms adımlarla eşit.
+	// TEŞHİS (rawrec46): bölümün ilk 16 paketi [varış ms, rtp ms]. Burada
+	// ilk paket 45 ms geç geldi (jitter), sonrakiler tam zamanında → 16.
+	// paket varışta 300−45 = 255 ms, RTP'de 300 ms. Desen tam bunu gösterir.
 	ip, _ := bl[1]["ilk_paketler"].([]any)
 	if len(ip) != 16 {
 		t.Fatalf("ilk_paketler 16 olmalı: %d", len(ip))
 	}
 	son, _ := ip[15].([]any)
-	if son[0].(float64) != 300 || son[1].(float64) != 300 {
-		t.Fatalf("ilk_paketler[15] [300 300] olmalı: %v", son)
+	if son[0].(float64) != 255 || son[1].(float64) != 300 {
+		t.Fatalf("ilk_paketler[15] [255 300] olmalı: %v", son)
 	}
 	if enB > 0.002 {
 		t.Fatalf("sapma %.4f sn (SR kesinleştirince ≤2 ms)", enB)
@@ -1213,5 +1214,110 @@ func TestSesSRVarisTitremesi(t *testing.T) {
 	}
 	if enB > 0.002 {
 		t.Fatalf("titremeli SR'la sapma %.4f sn (yayıncı saatiyle ≤2 ms olmalı)", enB)
+	}
+}
+
+// ── rawrec47: RED birincil bloğa yakalama saati + erken ilk paket ─────────
+
+// TestSesREDYakalamaSaati — mikrofon hep RED sarmalı gelir; yakalama saati
+// yalnız birincil bloğa ulaşmalı (rawrec43-46 hiç ulaştırmıyordu → 914-916'da
+// act_oran 0). Durma "act" yoluyla, kesin.
+func TestSesREDYakalamaSaati(t *testing.T) {
+	k := &sahteSesKaynak{}
+	y := yeniYayinci(t0(), 500_000)
+	y.act = true
+	var ham []spaket
+	for i := 0; i < 300; i++ {
+		if i == 150 {
+			y.dur(3000)
+		}
+		ham = append(ham, y.paket())
+		if i%50 == 0 {
+			y.srEkle(k)
+		}
+	}
+	var d []spaket
+	bloklar := map[int]uint64{}
+	for i, p := range ham {
+		q := p
+		if i > 0 {
+			q.yuk = redSar(ham[i-1].yuk, p.yuk)
+			bloklar[i] = 2
+		} else {
+			q.yuk = redSar(nil, p.yuk)
+			bloklar[i] = 1
+		}
+		d = append(d, q)
+	}
+	dir := t.TempDir()
+	w := yeniSesYazici(t, dir, k, true)
+	yol := sesBesle(t, w, k, dir, d, func(i int) uint64 { return bloklar[i] })
+	k.ilet(w, 1<<62)
+	w.Close()
+	pk, yan := oggPaketleriOku(t, yol), yanOku(t, yol)
+	oz := ozDenetim(t, yan)
+	bl := bolumler(t, yan)
+	enB, at := enBuyukSapma(t, pk, y.dogru)
+	t.Logf("RED + yakalama saati: sapma %.4f (paket %d) oz=%v", enB, at, oz)
+	if oz["act_paket"].(float64) != 300 {
+		t.Fatalf("RED birincil bloğun yakalama saati eşleyiciye ulaşmalı (300): %v", oz["act_paket"])
+	}
+	if len(bl) != 2 || bl[1]["kaynak"] != "act" || bl[1]["kesin"] != true {
+		t.Fatalf("durma yakalama saatiyle kesin olmalıydı: %v", bl)
+	}
+	if enB > 0.002 {
+		t.Fatalf("sapma %.4f sn", enB)
+	}
+}
+
+// TestSesErkenIlkPaket — açılış sonrası İLK paket 200 ms erken gelir, akış
+// sonra başlar (Safari, kayıt 917/918). SR gelmese de taban ikinci pakete
+// taşınır: ilk paket dışında sapma ≤ 2 ms. Eski kural 200 ms şaşırırdı.
+func TestSesErkenIlkPaket(t *testing.T) {
+	k := &sahteSesKaynak{}
+	y := yeniYayinci(t0(), 500_000)
+	y.jitter = func(i int) time.Duration {
+		if i == 200 {
+			return -200 * time.Millisecond
+		}
+		return 0
+	}
+	d := dizi(k, y, 600, 0, func(i int, y *yayinci) bool {
+		if i == 0 || i == 150 {
+			y.srEkle(k) // SR yalnız bölüm 0'da; bölüm 1 SR'sız kalır
+		}
+		if i == 200 {
+			y.dur(30000)
+			return true
+		}
+		return false
+	})
+	pk, yan := sesKos(t, k, d)
+	oz := ozDenetim(t, yan)
+	bl := bolumler(t, yan)
+	var enB float64
+	var ilk float64
+	for i, p := range pk {
+		fark := konumSn(p) - float64(y.dogru[i])/48000
+		if fark < 0 {
+			fark = -fark
+		}
+		if i == 200 {
+			ilk = fark
+			continue
+		}
+		if fark > enB {
+			enB = fark
+		}
+	}
+	t.Logf("erken ilk paket: ilk paket sapması %.3f, geri kalan en büyük %.4f oz=%v bl=%v", ilk, enB, oz, bl)
+	if len(bl) != 2 || bl[1]["kesin"] != false || oz["erken_paket"].(float64) != 1 {
+		t.Fatalf("erken ilk paket kuralı bir kez işlemeliydi, bölüm SR'sız kalmalıydı: oz=%v bl=%v", oz, bl)
+	}
+	if enB > 0.002 {
+		t.Fatalf("ilk paket dışında sapma %.4f sn (≤2 ms)", enB)
+	}
+	if ilk < 0.19 || ilk > 0.21 {
+		t.Fatalf("ilk paket varışta kalmalı (~0,2 sn): %.3f", ilk)
 	}
 }

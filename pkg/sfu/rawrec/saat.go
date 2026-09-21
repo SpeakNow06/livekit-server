@@ -50,6 +50,13 @@ const (
 	// geçerse ilk paket bayattı (LiveKit `isPacketTooOld`): taban ona değil
 	// bu pakete kurulur.
 	bayatEsik = 500 * time.Millisecond
+	// erkenBoslukEsik — geçici bölümün ilk paketlerinde varış RTP'den bu
+	// kadar GERİ kalırsa (ilk paket erken/tek gelmiş, akış sonra başlamış)
+	// taban o pakete taşınır (bayat kuralının aynası). Safari açılışta böyle:
+	// kayıt 917'de SR tabanı 203 ms düzeltti, 918 başlangıcında 2 paket +
+	// 203 ms boşluk + akış görüldü. Ağ titremesi ≤ 40 ms, DTX boşlukları
+	// RTP'yle tutarlı → tetiklemez. SR gelmese de taban doğru kalır.
+	erkenBoslukEsik = 100 * time.Millisecond
 	// srToleransSn — SR'dan hesaplanan taban geçici tabandan bu kadar
 	// uzaksa SR'a güvenilmez (bozuk SR: crbug 168328), geçici kalır.
 	srToleransSn = 10.0
@@ -117,6 +124,7 @@ type sesSaat struct {
 	srBozuk   int       // toleransı aşan SR sayısı
 	srAtlanan int       // hiçbir bölümün penceresine düşmeyen SR (susturma içi)
 	bayat     int       // bayat ilk paket düzeltmesi sayısı
+	erken     int       // erken ilk paket düzeltmesi sayısı (rawrec47)
 
 	// ── YAKALAMA SAATİ (abs-capture-time, Adım 6) ────────────────────────
 	// Paketin başlığındaki yakalanma anı yayıncının kendi saati: ağ titremesi
@@ -243,6 +251,15 @@ func (s *sesSaat) yerlestir(rtp uint32, gelis time.Time, seq uint16, yedek bool,
 		b.Pts0 += duz - pts
 		pts = duz
 		s.bayat++
+	case !b.Kesin && b.Paket <= 3 && b.Sira > 0 && eksik > erkenBoslukEsik:
+		// ERKEN İLK PAKET (rawrec47): bölümün başında akış varıştan geride
+		// kaldı — ilk paket(ler) erken gelmiş, gerçek akış boşluktan sonra
+		// başlamış. Taban buna taşınır; kuyruktaki ilk paket(ler) olduğu
+		// yerde kalır (≤ 60 ms ses, önemsiz). SR sonra yine kesinleştirir.
+		duz := s.sonPts + s.sureOrnek(dGelis)
+		b.Pts0 += duz - pts
+		pts = duz
+		s.erken++
 	}
 	return s.bitir(b, rtp, gelis, seq, pts, dRtp, yeni)
 }
@@ -399,6 +416,7 @@ func (s *sesSaat) ozDenetim() map[string]any {
 		"sr_bozuk":    s.srBozuk,
 		"sr_atlanan":  s.srAtlanan,
 		"bayat_paket": s.bayat,
+		"erken_paket": s.erken,
 		"act_paket":   s.actPaket,
 	}
 	if s.paketSayisi > 0 {

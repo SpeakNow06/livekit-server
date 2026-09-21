@@ -469,9 +469,17 @@ func (w *Writer) Write(payload []byte, rtpTS uint32, örnek uint32, seq uint16, 
 			return
 		}
 		for _, b := range bloklar {
-			// Yedek bloğun yakalanma anı taşıyıcının değil: 0 (eşleyici
-			// yedekler için durum güncellemiyor zaten).
-			w.kuyruğaKoy(b.veri, rtpTS-b.ofset, örnek, an, b.ofset != 0, seq, 0)
+			// Yakalanma anı yalnız BİRİNCİL bloğa: yedek blok bir önceki
+			// paketin sesi, taşıyıcının saati ona ait değil.
+			// ⚠ rawrec43-46 burada İKİSİNE DE 0 veriyordu → mikrofon (hep RED)
+			// için yakalama saati eşleyiciye HİÇ ulaşmadı: 914-916'da
+			// act_oran 0 çıktı, Chrome aslında her pakete yazıyordu (rawrec46
+			// tanısı: 1. pakette id 5, ~1/sn). Kayıt 47'de düzeltildi.
+			yak := yakalamaNs
+			if b.ofset != 0 {
+				yak = 0
+			}
+			w.kuyruğaKoy(b.veri, rtpTS-b.ofset, örnek, an, b.ofset != 0, seq, yak)
 		}
 		return
 	}

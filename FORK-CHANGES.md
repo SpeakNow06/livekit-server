@@ -1309,6 +1309,18 @@ geçemezdi). Sahte SR kaynağı artık yazıcıya İTİYOR (`ilet`, RTCP okuyucu
   derse girince tanı satırı (`uzanti_idleri`) tele bakar.
 İmaj `v1.11.0-rawrec46`, iki sunucuda.
 
+## 35. rawrec47: RED birincil bloğa yakalama saati (BUG) + erken ilk paket kuralı (2026-09-21)
+- **BUG (rawrec43-46):** `rawrec.go Write` RED sarmalını açarken `kuyruğaKoy(..., yakalamaNs=0)` — yedek VE
+  birincil bloğa 0. Mikrofon hep `audio/red` → abs-capture-time eşleyiciye HİÇ ulaşmadı (914-916 `act_oran` 0).
+  rawrec46 tanısı Chrome 152'nin her pakete yazdığını gösterdi (1. pakette id 5, ~1/sn). Düzeltme: birincil
+  bloğa `yakalamaNs`, yedeğe 0. Test `TestSesREDYakalamaSaati` (300/300 act, durma `act` yoluyla kesin).
+- **Erken ilk paket** (`saat.go`, `erkenBoslukEsik = 100 ms`, `s.erken` → `erken_paket`): geçici bölümün ilk 3
+  paketinde varış RTP'den 100 ms'den fazla geride kalırsa taban o pakete taşınır (bayat kuralının aynası).
+  Safari açılışta ilk paketi erken yollayıp akışa ~200 ms sonra başlıyor (917: SR +203 ms düzeltti; 918
+  `ilk_paketler`: 2 paket, 203 ms boşluk, akış). SR gelmese de taban doğru. Test `TestSesErkenIlkPaket`
+  (ilk paket dışında sapma 0; ilk paket varışta kalır).
+İmaj `v1.11.0-rawrec47`.
+
 ## Rebuild
 ```bash
 cd livekit-server-source            # bu repo, branch speaknow-vp9-simulcast
