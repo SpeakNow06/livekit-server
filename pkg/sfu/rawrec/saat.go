@@ -133,13 +133,14 @@ type sesSaat struct {
 	// Firefox libwebrtc'ye yakalama zamanı vermiyor (uzantı pazarlansa da
 	// pakete girmez) → orada varış/SR yolu sürer. Mobil (react-native)
 	// zaten durmuyor.
-	sonYak      int64  // son (yedek olmayan) paketin yakalanma anı, 0 = yok
-	sonYakRTP   uint32 // o paketin RTP'si
-	sonYakPts   int64  // o paketin dosyadaki yeri: yakalama saatiyle yer = sonYakPts + Δyakalama
-	sonYakBolum int    // o paketin bölümü (SR kayması olursa sonYakPts de kayar; referans bölümden önceyse geçici bölüm kesinleşir)
-	actPaket    int    // yakalama saatli paket sayısı
-	actBayat    int    // bayat yakalama saati: varış "durdu" dedi, damga onaylamadı (rawrec49, kayıt 920)
-	paketSayisi int    // yedek dışı toplam paket
+	sonYak      int64     // son (yedek olmayan) paketin yakalanma anı, 0 = yok
+	sonYakRTP   uint32    // o paketin RTP'si
+	sonYakPts   int64     // o paketin dosyadaki yeri: yakalama saatiyle yer = sonYakPts + Δyakalama
+	sonYakBolum int       // o paketin bölümü (SR kayması olursa sonYakPts de kayar; referans bölümden önceyse geçici bölüm kesinleşir)
+	actPaket    int       // yakalama saatli paket sayısı
+	actG        actGunluk // damga günlüğü (pts ↔ yakalama anı), yan JSON `act_gunlugu`
+	actBayat    int       // bayat yakalama saati: varış "durdu" dedi, damga onaylamadı (rawrec49, kayıt 920)
+	paketSayisi int       // yedek dışı toplam paket
 }
 
 // actEsik — yakalama saatiyle ölçülen eksik bunu aşarsa bölüm açılır.
@@ -184,6 +185,7 @@ func (s *sesSaat) yerlestir(rtp uint32, gelis time.Time, seq uint16, yedek bool,
 		s.paketSayisi = 1
 		if yakNs > 0 {
 			s.actPaket, s.sonYak, s.sonYakRTP, s.sonYakPts, s.sonYakBolum = 1, yakNs, rtp, 0, 0
+			s.actG.ekle(0, yakNs)
 		}
 		return 0, nil, nil, 0
 	}
@@ -267,6 +269,7 @@ func (s *sesSaat) yerlestir(rtp uint32, gelis time.Time, seq uint16, yedek bool,
 		}
 		p, y := s.bitir(b, rtp, gelis, seq, pts, dRtp, yeni)
 		s.sonYak, s.sonYakRTP, s.sonYakPts, s.sonYakBolum = yakNs, rtp, p, b.Sira
+		s.actG.ekle(p, yakNs)
 		return p, y, kaymaBolum, kayma
 	}
 	switch {
@@ -305,6 +308,7 @@ func (s *sesSaat) yerlestir(rtp uint32, gelis time.Time, seq uint16, yedek bool,
 	if yakNs > 0 && s.sonYak == 0 {
 		// İlk damga: referans (bayat şüphelisi buraya düşmez, referansı korur).
 		s.sonYak, s.sonYakRTP, s.sonYakPts, s.sonYakBolum = yakNs, rtp, p, s.simdiki().Sira
+		s.actG.ekle(p, yakNs)
 	}
 	return p, y, nil, 0
 }

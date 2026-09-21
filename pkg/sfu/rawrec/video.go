@@ -428,7 +428,7 @@ func (w *VideoWriter) loop() {
 		parçaAnahtar bool
 		parçaBozuk   bool  // toplanan karenin ortasında eksik paket var
 		parçaYak     int64 // toplanan karenin yakalanma anı (abs-capture-time), 0 = yok
-		başladı      bool // ilk anahtar kare görüldü mü
+		başladı      bool  // ilk anahtar kare görüldü mü
 
 		// SIRA TAMPONU (2026-09-04, kayıt 185). Paketler kare toplayıcıya
 		// GELİŞ sırasıyla değil, SIRA NUMARASI düzeniyle giriyor. Gerekçe
@@ -502,9 +502,10 @@ func (w *VideoWriter) loop() {
 		// "yakalama saati taşıyan son kare" (act) ile "son yazılan kare"
 		// ayrı tutuluyor; son yazılan karenin yakalanma anı aynı katmanın RTP
 		// farkıyla enterpole ediliyor (`sonActYak + Δrtp/hz`).
-		sonActYak    int64  // yakalama saati taşıyan son yazılan karenin anı
-		sonActRTP    uint32 // o karenin RTP'si
-		sonActKatman int32 = -1
+		sonActYak    int64     // yakalama saati taşıyan son yazılan karenin anı
+		actG         actGunluk // damga günlüğü (pts@90k ↔ yakalama anı), yan JSON `act_gunlugu` (rawrec50)
+		sonActRTP    uint32    // o karenin RTP'si
+		sonActKatman int32     = -1
 		actKare      int
 
 		// REFERANS KATMAN — bütün katmanlar bunun damga uzayına çevriliyor
@@ -558,6 +559,9 @@ func (w *VideoWriter) loop() {
 					ek["act_kare"] = actKare
 					if kare > 0 {
 						ek["act_oran"] = yuvarla(float64(actKare) / float64(kare))
+					}
+					if len(actG.orn) > 0 {
+						ek["act_gunlugu"] = actG.orn
 					}
 					return ek
 				}(),
@@ -834,6 +838,7 @@ func (w *VideoWriter) loop() {
 		if yakNs > 0 {
 			sonActYak, sonActRTP, sonActKatman = yakNs, rtpTS, suAnkiKatman
 			actKare++
+			actG.ekle(pts, yakNs)
 		}
 		if kareGunluguAcik {
 			kareGunluk = append(kareGunluk, kareOrnek{

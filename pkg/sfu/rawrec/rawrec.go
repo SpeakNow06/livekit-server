@@ -1041,6 +1041,9 @@ func (w *Writer) yanJSON(yol string, ilkAn time.Time, kare int, ilkRTP, sonRel u
 	ek := katilimciEk(h)
 	ek["bolumler"] = saat.bolumler
 	ek["oz_denetim"] = saat.ozDenetim()
+	if len(saat.actG.orn) > 0 {
+		ek["act_gunlugu"] = saat.actG.orn // pts@hz ↔ yayıncı yakalama anı (rawrec50)
+	}
 	ek["yazma_gecikme_sn"] = yazmaGecikme.Seconds()
 	yanJSONYaz(yanParam{
 		yol: yol, sid: w.sid, ilkAn: ilkAn, kare: kare, ilkRTP: ilkRTP, sonRel: sonRel,
@@ -1079,6 +1082,48 @@ func katilimciEk(h *hedef) map[string]any {
 //	  postprocess'te denetlenebiliyor.
 //
 // Maliyeti birkaç yüz KB JSON.
+// actOrnek — yakalama damgası günlüğü öğesi: dosyadaki yer (pts, saat
+// biriminde) ↔ yayıncının yakalama anı (unix ns, YAYINCI saati). Ses ve
+// görüntü aynı cihaz saatini taşıdığı için ikisinin `yak − pts/hz` çapaları
+// arasındaki fark, oynatıcıdaki ses↔görüntü kaymasının kesin ölçüsü
+// (rawrec50; el çırpma/göz gerekmez). Adım 7'nin de girdisi.
+type actOrnek struct {
+	Pts   int64 `json:"pts"`
+	YakNs int64 `json:"yak_ns"`
+}
+
+// actGunlukUst — günlükte en çok bu kadar örnek; dolunca her ikinci örnek
+// atılır ve kayıt adımı iki katına çıkar (uzun derste ~200-400 örnek kalır).
+const actGunlukUst = 400
+
+type actGunluk struct {
+	orn   []actOrnek
+	adim  int // 0/1 = her damgalı paket; 2, 4, 8… seyreltme adımı
+	sayac int
+}
+
+func (g *actGunluk) ekle(pts, yakNs int64) {
+	g.sayac++
+	if g.adim > 1 && g.sayac%g.adim != 0 {
+		return
+	}
+	g.orn = append(g.orn, actOrnek{Pts: pts, YakNs: yakNs})
+	if len(g.orn) >= actGunlukUst {
+		k := g.orn[:0]
+		for i, o := range g.orn {
+			if i%2 == 0 {
+				k = append(k, o)
+			}
+		}
+		g.orn = k
+		if g.adim < 2 {
+			g.adim = 2
+		} else {
+			g.adim *= 2
+		}
+	}
+}
+
 type srOrnek struct {
 	Katman int32  `json:"katman"`
 	RTP    uint32 `json:"rtp"`

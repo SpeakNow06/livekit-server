@@ -1350,6 +1350,15 @@ geçemezdi). Sahte SR kaynağı artık yazıcıya İTİYOR (`ilet`, RTCP okuyucu
   kayıp, damga 1 sn sonra — eski kod 48 sn erken kalırdı). Öz denetim `act_bayat`.
 İmaj `v1.11.0-rawrec49`.
 
+## 38. rawrec50: DAMGA GÜNLÜĞÜ — ses↔görüntü hizasının ölçüsü (2026-09-21)
+- `rawrec.go`: `actOrnek{pts, yak_ns}`, `actGunluk` (≤400 örnek, dolunca seyreltme). Ses (`saat.go actG`, damgalı
+  her paket) ve görüntü (`video.go actG`, damgalı her kare) yan JSON'a `act_gunlugu` yazar: dosya konumu ↔
+  YAYINCININ yakalama anı. İki dosya aynı cihaz saatini taşıdığından `medyan(yak − pts/hz)` çapaları arasındaki
+  fark oynatıcıdaki ses↔görüntü kaymasının kesin ölçüsü (el çırpma/göz gerekmez; denoise etkilemez). Eğim = ses
+  saatinin kameraya göre sürüklenmesi (ppm). Analiz: prod `~/act-probe/act-hiza.py <kayıt>`. Adım 7'nin girdisi
+  (çapaları SR yerine damgadan kurmak).
+İmaj `v1.11.0-rawrec50`.
+
 ## Rebuild
 ```bash
 cd livekit-server-source            # bu repo, branch speaknow-vp9-simulcast

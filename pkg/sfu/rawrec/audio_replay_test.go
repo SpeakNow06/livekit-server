@@ -1364,6 +1364,18 @@ func TestSesYakalamaSaatiSeyrek(t *testing.T) {
 	if oz["durum"] != "tutarli" {
 		t.Fatalf("öz denetim tutarlı olmalı: %v", oz)
 	}
+	// DAMGA GÜNLÜĞÜ (rawrec50): damgalı her paket için (pts, yak) — 17 örnek;
+	// yak − pts/hz sabit (ofset −3 sa −40 ms), ses↔görüntü hizası buradan ölçülür.
+	g, _ := yan["act_gunlugu"].([]any)
+	if len(g) != 17 {
+		t.Fatalf("act_gunlugu 17 örnek olmalı: %d", len(g))
+	}
+	ilk, son := g[0].(map[string]any), g[16].(map[string]any)
+	c0 := ilk["yak_ns"].(float64) - ilk["pts"].(float64)*1e9/48000
+	c1 := son["yak_ns"].(float64) - son["pts"].(float64)*1e9/48000
+	if math.Abs(c1-c0) > 1e6 {
+		t.Fatalf("damga çapası sabit kalmalı (fark %.1f ms)", (c1-c0)/1e6)
+	}
 }
 
 // ── rawrec49: BAYAT YAKALAMA SAATİ (kayıt 920) ──────────────────────────────
