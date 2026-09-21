@@ -75,6 +75,11 @@ type sesBolum struct {
 	MuteSinyali  bool     `json:"mute_sinyali"`          // yayıncı mute sinyaliyle mi açıldı
 	IlkGelisNs   int64    `json:"ilk_gelis_ns"`          // ilk paketin sunucuya varışı
 	Paket        int      `json:"paket"`                 // bölümdeki paket sayısı
+	// IlkPaketler — bölümün ilk 16 paketi: [varış ms (ilk pakete göre),
+	// RTP ms (RTP0'a göre)]. TEŞHİS (rawrec46, kayıt 917): Safari'de SR
+	// düzeltmesi 203 ms çıktı (Chrome 9,5 ms); açılış sonrası ilk paketler
+	// patlama mı, gecikmeli mi geliyor, buradan okunur.
+	IlkPaketler [][2]float64 `json:"ilk_paketler,omitempty"`
 
 	sonRTP     uint32
 	sonPts     int64
@@ -251,6 +256,12 @@ func (s *sesSaat) bitir(b *sesBolum, rtp uint32, gelis time.Time, seq uint16,
 	}
 	s.sonRTP, s.sonGelis, s.sonSeq, s.sonPts = rtp, gelis, seq, pts
 	b.sonRTP, b.sonPts, b.sonGelisNs = rtp, pts, gelis.UnixNano()
+	if b.Paket < 16 {
+		b.IlkPaketler = append(b.IlkPaketler, [2]float64{
+			yuvarla(float64(gelis.UnixNano()-b.IlkGelisNs) / 1e6),
+			yuvarla(float64(sdelta(rtp, b.RTP0)) * 1000 / float64(s.hz)),
+		})
+	}
 	b.Paket++
 	if pts > s.enSonPts {
 		s.enSonPts = pts

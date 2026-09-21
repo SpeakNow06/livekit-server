@@ -1108,6 +1108,16 @@ func TestSesSusturmaIciSRAtilir(t *testing.T) {
 	if srGunlugu(t, yan) != 5 {
 		t.Fatalf("günlükte yalnız gerçek SR'lar olmalı (5): %d", srGunlugu(t, yan))
 	}
+	// TEŞHİS (rawrec46): bölümün ilk 16 paketi [varış ms, rtp ms] — burada
+	// düzgün akış: ilk [0,0], sonrakiler 20 ms adımlarla eşit.
+	ip, _ := bl[1]["ilk_paketler"].([]any)
+	if len(ip) != 16 {
+		t.Fatalf("ilk_paketler 16 olmalı: %d", len(ip))
+	}
+	son, _ := ip[15].([]any)
+	if son[0].(float64) != 300 || son[1].(float64) != 300 {
+		t.Fatalf("ilk_paketler[15] [300 300] olmalı: %v", son)
+	}
 	if enB > 0.002 {
 		t.Fatalf("sapma %.4f sn (SR kesinleştirince ≤2 ms)", enB)
 	}

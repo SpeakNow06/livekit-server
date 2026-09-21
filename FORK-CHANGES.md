@@ -1295,6 +1295,20 @@ geçemezdi). Sahte SR kaynağı artık yazıcıya İTİYOR (`ilet`, RTCP okuyucu
 (ofset bağımsızlığı kanıtı). Altın SHA değişmedi; 911A son −0,031 sn, artık 8,8 ms.
 İmaj `v1.11.0-rawrec45`.
 
+## 34. rawrec46: TEŞHİS — bölüm ilk paketleri + ses paketi uzantı kimlikleri (2026-09-21, kayıt 917 / ses act)
+- `saat.go`: `sesBolum.IlkPaketler` (`ilk_paketler`, ilk 16 paket: [varış ms, RTP ms]) — Safari'de (917) SR
+  düzeltmesi 203 ms çıktı (Chrome 9,5 ms), açılış sonrası paketler patlama mı gecikme mi, buradan okunacak.
+- `receiver_base.go forwardRTP`: ses paketlerinde 1., 50., 500. pakette `rawrec ses tanı: paket başlık
+  uzantıları` (`uzanti_idleri` = telin üstündeki kimlikler, `act_ext`, `act_paket`). "Yayıncı yazmıyor" ile
+  "sunucu okumuyor" ayrımı.
+- BULGU (sunucudaki headless Chrome 149 + sahte mikrofon, `~/act-probe/` sonda sayfası, üç yayın deseni: düz
+  publishTrack, sınıfın warm-mik replaceTrack deseni, setMicrophoneEnabled): ses paketleri abs-capture-time
+  TAŞIYOR (1. pakette id 5, sonra ~1/sn: 500 pakette 11-16), gönderici `getParameters().headerExtensions`
+  5=abs-capture-time. Yani SFU yolu ve pazarlık sağlam; kullanıcının gerçek Chrome 152 + macOS mikrofonu
+  0/2419 → fark yayıncı tarafında (sürüm ya da gerçek mikrofon yakalama zamanı). Sıradaki: kullanıcı Chrome ile
+  derse girince tanı satırı (`uzanti_idleri`) tele bakar.
+İmaj `v1.11.0-rawrec46`, iki sunucuda.
+
 ## Rebuild
 ```bash
 cd livekit-server-source            # bu repo, branch speaknow-vp9-simulcast

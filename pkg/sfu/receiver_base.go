@@ -1131,6 +1131,7 @@ func (r *ReceiverBase) forwardRTP(
 		"forwardersGeneration", r.forwardersGeneration.Load(),
 	)
 
+	var rawrecTaniPaket, rawrecTaniAct int // TANI sayaçları (rawrec46), bkz. aşağı
 	for r.forwardersGeneration.Load() == forwarderGeneration {
 		extPkt, err = buff.ReadExtended(pktBuf)
 		if err == io.EOF {
@@ -1150,8 +1151,24 @@ func (r *ReceiverBase) forwardRTP(
 			// Varış = tampona giriş anı (Arrival), SFU kuyruğunun gecikmesi
 			// eşleyicinin "durmuş saat" ölçüsüne karışmasın (rawrec/saat.go).
 			// Yakalama saati (abs-capture-time) varsa eşleyici onu kullanır.
+			yakNs := rawrecYakalamaNs(extPkt)
 			rawWriter.Write(extPkt.Packet.Payload, extPkt.Packet.Timestamp, 960,
-				extPkt.Packet.SequenceNumber, extPkt.Arrival, rawrecYakalamaNs(extPkt))
+				extPkt.Packet.SequenceNumber, extPkt.Arrival, yakNs)
+			// TANI (rawrec46): ses paketleri abs-capture-time taşıyor mu?
+			// Pazarlık tam olduğu hâlde 916'da 0/2419 paket taşıdı. Telin
+			// üstündeki uzantı kimlikleri 1., 50. ve 500. pakette loglanır:
+			// "yayıncı yazmıyor" ile "sunucu okumuyor" burada ayrılır.
+			rawrecTaniPaket++
+			if yakNs > 0 {
+				rawrecTaniAct++
+			}
+			if rawrecTaniPaket == 1 || rawrecTaniPaket == 50 || rawrecTaniPaket == 500 {
+				r.params.Logger.Infow("rawrec ses tanı: paket başlık uzantıları",
+					"paket", rawrecTaniPaket, "act_paket", rawrecTaniAct,
+					"uzanti_idleri", extPkt.Packet.Header.GetExtensionIDs(),
+					"payloadType", extPkt.Packet.PayloadType,
+					"act_ext", extPkt.AbsCaptureTimeExt != nil)
+			}
 		}
 
 		if extPkt.Packet.PayloadType != uint8(r.params.Codec.PayloadType) {
