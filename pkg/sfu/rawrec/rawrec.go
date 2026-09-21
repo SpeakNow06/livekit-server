@@ -207,7 +207,7 @@ func initOnce() {
 	// bir yolluyor, susturma içindekiler atılıyor, iki aralık geçebiliyor);
 	// 10 sn birini kaçırıyordu. Geç kalırsa da kayıt bozulmaz: kesin değer
 	// yan JSON'a düşer, postprocess uygular (`_bolum_kaydirmalari`).
-	yazmaGecikme = time.Duration(envInt("SN_RAWREC_YAZMA_GECIKME", 20)) * time.Second
+	yazmaGecikme = time.Duration(envInt("SN_RAWREC_YAZMA_GECIKME", 25)) * time.Second // 25 (rawrec52): rapor basamağı 3 SR sonra (~15 sn) kesinleşiyor
 	pinHigh = envOr("SN_RAWREC_PIN_HIGH", "1") != "0"
 	kfEnÇokKare = envInt("SN_RAWREC_KEYFRAME_MAX_KARE", 24)
 	kfEnAzSn = time.Duration(envInt("SN_RAWREC_KEYFRAME_MIN_SN", 2)) * time.Second
@@ -656,6 +656,25 @@ func (w *Writer) loop() {
 	srIsle := func(sr *livekit.RTCPSenderReportState) {
 		b, kayma := saat.srGeldi(sr)
 		if kayma == 0 {
+			return
+		}
+		if b.Kaynak == "sr-adim" {
+			// RAPOR BASAMAĞI (rawrec52): bölüm ORTADAN bölündü — bölme
+			// noktasından (eski koordinatta Pts0−kayma) sonraki kuyruk
+			// öğeleri kayar ve yeni bölüme geçer.
+			bolP := b.Pts0 - kayma
+			n := 0
+			for i := range kuyruk {
+				if kuyruk[i].pts >= bolP {
+					kuyruk[i].pts += kayma
+					kuyruk[i].bolum = b
+					n++
+				}
+			}
+			w.log.Infow("rawrec ses: rapor basamağı — bölüm bölündü",
+				"track", w.trackID, "sid", w.sid, "bolum", b.Sira,
+				"adim_ms", yuvarla(saat.ornekSn(kayma)*1000), "kaydirilan_paket", n,
+				"bolme_sn", yuvarla(saat.ornekSn(bolP)))
 			return
 		}
 		for i := range kuyruk {

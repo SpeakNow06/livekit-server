@@ -64,6 +64,22 @@ const (
 	// verilen düzeltme payı: varış tahmini ≤ 40 ms şaşar, bozuk SR
 	// saniyelerce — dar pay bozuğu eler (rawrec45, kayıt 915 dersi).
 	srTekToleransSn = 0.5
+	// RAPOR BASAMAĞI (rawrec52, Firefox 923): damgasız akışta tek tanık SR.
+	// Kesin bir bölümde SR'ın söylediği taban ile RTP'ye göre yer arasındaki
+	// fark izlenir; SON ÜÇ SR'ın ortalaması ÖNCEKİ ÜÇÜN ortalamasından
+	// srAdimEsikSn'den fazla ayrılır ve iki grup kendi içinde srAdimYayilimSn
+	// içinde tutarlıysa yayıncının sayacı basamak atlamıştır (açılışta bir
+	// karelik yeniden tabanlama). ⚠ "Art arda iki SR 10 ms" DENENDİ: Chrome'un
+	// SR'ları kendiliğinden ±15 ms salınıyor (911 öğretmeni: −16…+3 ms, std
+	// 6,5) → 72 yanlış tetik. Grup kuralı 911'de 0, Firefox 923'te 1 (−20,7 ms).
+	// Damgalı akışta hiç çalışmaz (`actPaket > 0`): damga 10 ms'de görür.
+	srAdimEsikSn    = 0.015
+	srAdimYayilimSn = 0.010
+	srAdimGrup      = 3
+	// hicEsik — basamağın YERİ: son uyumlu SR'dan beri varışın RTP'den en
+	// çok geri kaldığı paket (açılış hıçkırığı) bunu aşıyorsa bölme oraya,
+	// yoksa "şimdi"ye (arada en çok bir SR aralığı 20 ms şaşar).
+	hicEsik = 10 * time.Millisecond
 	// ozDenetimEsikSn — SR duvar süresi ile yazılan süre farkı bunu aşarsa
 	// dosya "zaman-tutarsız" (Janus'un 0,5 sn uyarısı).
 	ozDenetimEsikSn = 0.5
@@ -119,7 +135,13 @@ type sesSaat struct {
 	anchorAday     []int64 // ilk bölümün SR'larından sunucu-saati adayları (bkz. srGeldi)
 	anchorAdayK    []int64 // aynı SR'ların yayıncı-saati adayları (aynı sıra)
 
-	srSonNTP  uint64
+	srSonNTP uint64
+	// Rapor basamağı (rawrec52): son SR sapmaları (örnek, en çok 2×grup) ve
+	// her SR aralığının en büyük varış hıçkırığı (bölme noktası adayı).
+	srSapma   []int64
+	hicAra    []hicKaydi
+	hicSu     hicKaydi
+	srAdim    int
 	gunluk    []srOrnek // SR günlüğü, pts'li
 	srBozuk   int       // toleransı aşan SR sayısı
 	srAtlanan int       // hiçbir bölümün penceresine düşmeyen SR (susturma içi)
@@ -273,6 +295,7 @@ func (s *sesSaat) yerlestir(rtp uint32, gelis time.Time, seq uint16, yedek bool,
 			s.bayat++
 		}
 		p, y := s.bitir(b, rtp, gelis, seq, pts, dRtp, yeni)
+		s.hicKaydet(eksik, p, rtp, gelis, yeni)
 		s.sonYak, s.sonYakRTP, s.sonYakPts, s.sonYakBolum = yakNs, rtp, p, b.Sira
 		s.actG.ekle(p, yakNs)
 		return p, y, kaymaBolum, kayma
@@ -310,6 +333,7 @@ func (s *sesSaat) yerlestir(rtp uint32, gelis time.Time, seq uint16, yedek bool,
 		s.erken++
 	}
 	p, y := s.bitir(b, rtp, gelis, seq, pts, dRtp, yeni)
+	s.hicKaydet(eksik, p, rtp, gelis, yeni)
 	if yakNs > 0 && s.sonYak == 0 {
 		// İlk damga: referans (bayat şüphelisi buraya düşmez, referansı korur).
 		s.sonYak, s.sonYakRTP, s.sonYakPts, s.sonYakBolum = yakNs, rtp, p, s.simdiki().Sira
@@ -338,6 +362,57 @@ func (s *sesSaat) bitir(b *sesBolum, rtp uint32, gelis time.Time, seq uint16,
 		s.enSonPts = pts
 	}
 	return pts, yeni
+}
+
+// hicKaydi — bir SR aralığındaki en büyük varış hıçkırığı (varış − RTP,
+// pozitif) ve yeri. Rapor basamağının bölme noktası adayı.
+type hicKaydi struct {
+	eksik   time.Duration
+	pts     int64
+	rtp     uint32
+	gelisNs int64
+}
+
+// hicKaydet — süren SR aralığının en büyük hıçkırığını tutar; yeni bölüm
+// açılınca basamak izleme sıfırlanır (bölüm başı zaten bir sıçrama, sapmalar
+// yeni tabana göre ölçülür).
+func (s *sesSaat) hicKaydet(eksik time.Duration, pts int64, rtp uint32, gelis time.Time, yeni *sesBolum) {
+	if yeni != nil {
+		s.srSapma, s.hicAra, s.hicSu = s.srSapma[:0], s.hicAra[:0], hicKaydi{}
+		return
+	}
+	if s.hicSu.pts == 0 || eksik > s.hicSu.eksik {
+		if s.hicSu.pts == 0 || eksik > s.hicSu.eksik {
+			s.hicSu = hicKaydi{eksik: eksik, pts: pts, rtp: rtp, gelisNs: gelis.UnixNano()}
+		}
+	}
+}
+
+func ortalama(v []int64) int64 {
+	if len(v) == 0 {
+		return 0
+	}
+	var t int64
+	for _, x := range v {
+		t += x
+	}
+	return t / int64(len(v))
+}
+
+func yayilim(v []int64) int64 {
+	if len(v) == 0 {
+		return 0
+	}
+	lo, hi := v[0], v[0]
+	for _, x := range v {
+		if x < lo {
+			lo = x
+		}
+		if x > hi {
+			hi = x
+		}
+	}
+	return hi - lo
 }
 
 // bolumZamanla — SR hangi bölüme ait: VARIŞ ANI (At) hangi bölümün paket
@@ -406,6 +481,12 @@ func (s *sesSaat) srGeldi(sr *livekit.RTCPSenderReportState) (*sesBolum, int64) 
 				s.anchorKaynakNs = (adayK + eski) / 2
 				s.anchorNs = (adayS + s.anchorAday[i]) / 2
 				s.anchorKesin = true
+				// Rapor basamağı dizisi (rawrec52): iki çapa SR'ının çapaya
+				// göre sapması (±d/2) "önce" grubunun ilk örnekleri.
+				s.srSapma = append(s.srSapma, (eski-s.anchorKaynakNs)*s.hz/int64(time.Second),
+					(adayK-s.anchorKaynakNs)*s.hz/int64(time.Second))
+				s.hicAra = append(s.hicAra, hicKaydi{}, s.hicSu)
+				s.hicSu = hicKaydi{}
 				break
 			}
 		}
@@ -444,6 +525,12 @@ func (s *sesSaat) srGeldi(sr *livekit.RTCPSenderReportState) (*sesBolum, int64) 
 		b.Kesin = true
 		b.Kaynak += "+sr"
 		b.sonPts += kayma
+		// Rapor basamağı dizisi (rawrec52): kesinleştiren SR'ın sapması tanım
+		// gereği 0 — "önce" grubunun ilk örneği. Tabanı tek SR kurduğu için
+		// onun salınımı tabanda; sonraki SR'lar buna göre ölçülür.
+		s.srSapma = append(s.srSapma[:0], 0)
+		s.hicAra = append(s.hicAra[:0], s.hicSu)
+		s.hicSu = hicKaydi{}
 		// Sonraki bölümler bu bölümün sonuna göre kurulmuştu: onlar da kayar.
 		for i := b.Sira + 1; i < len(s.bolumler); i++ {
 			s.bolumler[i].Pts0 += kayma
@@ -455,6 +542,71 @@ func (s *sesSaat) srGeldi(sr *livekit.RTCPSenderReportState) (*sesBolum, int64) 
 			s.sonYakPts += kayma
 		}
 		ptsSR += kayma
+	case s.anchorKesin && s.actPaket == 0 && (b.Kesin || b.Sira == 0):
+		// RAPOR BASAMAĞI (rawrec52): bölüm kesin, SR yine de tabanı başka
+		// yerde görüyor. Firefox (923) açılışta RTP'yi duvar saatine yeniden
+		// tabanlıyor ama bir kare (20 ms) eksik: varış kuralı görmez (titreme
+		// payı), damga yok → tek tanık SR. Grup kuralı (sabitlerin yorumu).
+		ptsKesin := (kaynak-s.anchorKaynakNs)*s.hz/int64(time.Second) - sdelta(sr.RtpTimestamp, b.RTP0)
+		s.srSapma = append(s.srSapma, ptsKesin-b.Pts0)
+		s.hicAra = append(s.hicAra, s.hicSu)
+		s.hicSu = hicKaydi{}
+		if len(s.srSapma) > 2*srAdimGrup {
+			s.srSapma = s.srSapma[1:]
+			s.hicAra = s.hicAra[1:]
+		}
+		n := len(s.srSapma)
+		if n < 2*srAdimGrup {
+			// İKİ TAM GRUP ŞART. Tabanı tek SR kurmuş olabilir ve o SR'ın
+			// kendi salınımını (Chrome ±15 ms) taşır; "önce" grubunu sıfır
+			// saymak 911A'da 17 ms'lik üç yanlış basamak verdi.
+			break
+		}
+		sonra := s.srSapma[n-srAdimGrup:]
+		once := s.srSapma[n-2*srAdimGrup : n-srAdimGrup]
+		adim := ortalama(sonra) - ortalama(once)
+		if s.ornekSn(yayilim(sonra)) > srAdimYayilimSn || s.ornekSn(yayilim(once)) > srAdimYayilimSn ||
+			(s.ornekSn(adim) < srAdimEsikSn && s.ornekSn(adim) > -srAdimEsikSn) {
+			break
+		}
+		{
+			// Bölme noktası: "sonra" grubunun aralıklarındaki en büyük
+			// hıçkırık (≥ hicEsik); yoksa ilk "sonra" aralığının kaydı;
+			// o da yoksa şimdi.
+			bolP, bolRTP, bolGelis := s.sonPts, s.sonRTP, s.sonGelis.UnixNano()
+			var enB hicKaydi
+			for _, h := range s.hicAra[n-srAdimGrup:] {
+				if h.eksik > enB.eksik {
+					enB = h
+				}
+			}
+			ilk := s.hicAra[n-srAdimGrup]
+			switch {
+			case enB.eksik >= hicEsik:
+				bolP, bolRTP, bolGelis = enB.pts, enB.rtp, enB.gelisNs
+			case ilk.pts > 0:
+				bolP, bolRTP, bolGelis = ilk.pts, ilk.rtp, ilk.gelisNs
+			}
+			e := s.ornekSn(adim)
+			yeni := &sesBolum{Sira: len(s.bolumler), RTP0: bolRTP, Pts0: bolP + adim,
+				Kaynak: "sr-adim", SrEksikSn: &e, Kesin: true, IlkGelisNs: bolGelis,
+				sonRTP: s.sonRTP, sonPts: s.sonPts + adim, sonGelisNs: s.sonGelis.UnixNano()}
+			b.sonGelisNs = bolGelis // eski bölümün penceresi bölmede biter
+			s.bolumler = append(s.bolumler, yeni)
+			s.sonPts += adim
+			s.enSonPts += adim
+			if s.sonYakBolum == b.Sira && s.sonYakPts >= bolP {
+				s.sonYakPts += adim
+				s.sonYakBolum = yeni.Sira
+			}
+			if sdelta(sr.RtpTimestamp, bolRTP) >= 0 {
+				ptsSR += adim
+			}
+			s.srSapma, s.hicAra, s.hicSu = s.srSapma[:0], s.hicAra[:0], hicKaydi{}
+			s.srAdim++
+			kayma = adim
+			b = yeni // yazıcı: pts ≥ Pts0−kayma olan kuyruk öğeleri kayar (srIsle)
+		}
 	}
 	if len(s.gunluk) < srGunluguUstSinir {
 		s.gunluk = append(s.gunluk, srOrnek{Katman: 0, RTP: sr.RtpTimestamp, AtNs: temel,
@@ -475,6 +627,7 @@ func (s *sesSaat) ozDenetim() map[string]any {
 		"bayat_paket": s.bayat,
 		"erken_paket": s.erken,
 		"act_bayat":   s.actBayat,
+		"sr_adim":     s.srAdim,
 		"act_paket":   s.actPaket,
 	}
 	if s.paketSayisi > 0 {

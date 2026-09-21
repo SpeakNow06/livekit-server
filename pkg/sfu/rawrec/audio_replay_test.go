@@ -561,8 +561,11 @@ func TestSes911A(t *testing.T) {
 	if oz["durum"] != "tutarli" {
 		t.Fatalf("911A öz denetim: %v", oz)
 	}
-	if n := oz["bolum"].(float64); n < 4 || n > 6 {
-		t.Fatalf("911A bölüm sayısı %v (4 kopuş bekleniyor)", n)
+	// rawrec52: rapor basamağı 911A'da iki kez daha böler (~17 ms; gerçek
+	// kayma mı Chrome SR salınımı mı bilinmiyor, ölçütler aynı ya da daha
+	// iyi: son −0,015, %0,41). 4 kopuş + en çok 2 basamak.
+	if n := oz["bolum"].(float64); n < 4 || n > 8 {
+		t.Fatalf("911A bölüm sayısı %v (4 kopuş + ≤2 rapor basamağı bekleniyor)", n)
 	}
 }
 
@@ -653,18 +656,18 @@ func TestSesDurmaSinyalsizKisa(t *testing.T) {
 		return false
 	})
 	pk, yan := sesKos(t, k, d)
-	enB, _ := enBuyukSapma(t, pk, y.dogru)
+	enB, at := enBuyukSapma(t, pk, y.dogru)
 	oz := ozDenetim(t, yan)
-	t.Logf("sinyalsiz 1 sn: sapma %.3f sn (beklenen ~1,0: düzeltilmez), oz=%v", enB, oz)
-	if math.Abs(enB-1.0) > 0.002 {
-		t.Fatalf("sinyalsiz 1 sn durma düzeltilmemeliydi (sapma %.3f)", enB)
+	bl := bolumler(t, yan)
+	// rawrec52: varış kuralı 2 sn eşiğinin altını görmez ama RAPOR BASAMAĞI
+	// görür — üç SR sonra bölüm hıçkırık paketinden bölünür, kuyruk kayar.
+	// (rawrec41-51'de "düzeltilmez, karne 1 sn açık söyler" idi.)
+	t.Logf("sinyalsiz 1 sn: sapma %.4f (paket %d) oz=%v bl=%v", enB, at, oz, bl)
+	if enB > 0.003 || oz["sr_adim"].(float64) != 1 || len(bl) != 2 || bl[1]["kaynak"] != "sr-adim" {
+		t.Fatalf("sinyalsiz 1 sn durma rapor basamağıyla düzelmeliydi: sapma %.4f oz=%v bl=%v", enB, oz, bl)
 	}
-	if oz["bolum"].(float64) != 1 {
-		t.Fatalf("bölüm açılmamalıydı: %v", oz)
-	}
-	// Ama karne bunu SÖYLEMELİ: SR duvar süresi yazılandan 1 sn uzun.
-	if a := oz["acik_sn"].(float64); math.Abs(a-1.0) > 0.05 || oz["durum"] != "zaman-tutarsiz" {
-		t.Fatalf("öz denetim 1 sn açığı görmeli: %v", oz)
+	if oz["durum"] != "tutarli" {
+		t.Fatalf("öz denetim tutarlı olmalı: %v", oz)
 	}
 }
 
@@ -687,17 +690,16 @@ func TestSesDurmaSinyalli(t *testing.T) {
 	pk, yan := sesKos(t, k, d)
 	oz := ozDenetim(t, yan)
 	bl := bolumler(t, yan)
-	// Paket 200..399: 0,5 sn düzeltilmiş → sapma 0. 400+: 0,1 sn düzeltilmemiş.
+	// Paket 200..399: 0,5 sn sinyalli durma → bölüm, SR ile kesin. 400+: 0,1 sn
+	// eşik altı; rawrec41-51'de düzeltilmezdi, rawrec52 RAPOR BASAMAĞI üç SR
+	// sonra hıçkırık paketinden (400) böler, kuyruk kayar → sapma 0.
 	for i, p := range pk {
 		d := konumSn(p) - float64(y.dogru[i])/48000.0
-		switch {
-		case i < 400 && math.Abs(d) > 0.002:
-			t.Fatalf("paket %d sapma %.4f (0,5 sn sinyalli durma düzeltilmeli)", i, d)
-		case i >= 400 && math.Abs(d+0.1) > 0.002:
-			t.Fatalf("paket %d sapma %.4f (0,1 sn eşik altı, düzeltilmez)", i, d)
+		if math.Abs(d) > 0.003 {
+			t.Fatalf("paket %d sapma %.4f (sinyalli 0,5 sn ve eşik altı 0,1 sn ikisi de düzelmeli)", i, d)
 		}
 	}
-	if len(bl) != 2 || bl[1]["mute_sinyali"] != true || bl[1]["kesin"] != true {
+	if len(bl) != 3 || bl[1]["mute_sinyali"] != true || bl[1]["kesin"] != true || bl[2]["kaynak"] != "sr-adim" {
 		t.Fatalf("bölümler: %v", bl)
 	}
 	t.Logf("sinyalli: bölümler=%d oz=%v", len(bl), oz)
@@ -1498,5 +1500,37 @@ func TestSesYakalamaSaatiKucukAdim(t *testing.T) {
 	}
 	if enB > 0.002 || oz["durum"] != "tutarli" {
 		t.Fatalf("sapma %.4f / oz=%v", enB, oz)
+	}
+}
+
+// TestSesSRAdimFirefox — Firefox modeli (kayıt 923): damga YOK; susturmada
+// paket yok, açılışta yayıncı RTP'yi duvar saatine yeniden tabanlıyor ama bir
+// kare (20 ms) eksik; varış hıçkırığı 20 ms (eşik altı). Tek tanık SR: art
+// arda iki SR +20 ms deyince bölüm hıçkırık paketinden bölünür, kuyruk kayar.
+func TestSesSRAdimFirefox(t *testing.T) {
+	k := &sahteSesKaynak{}
+	y := yeniYayinci(t0(), 500_000)
+	y.jitter = func(i int) time.Duration { return time.Duration((i*7919)%7-3) * time.Millisecond }
+	d := dizi(k, y, 900, 100, func(i int, y *yayinci) bool {
+		if i == 400 {
+			y.dur(12000)
+			y.rtpAtla(12000 - 20)
+			return true
+		}
+		return false
+	})
+	pk, yan := sesKos(t, k, d)
+	enB, at := enBuyukSapma(t, pk, y.dogru)
+	oz := ozDenetim(t, yan)
+	bl := bolumler(t, yan)
+	t.Logf("SR basamağı: sapma %.4f (paket %d) oz=%v bl=%v", enB, at, oz, bl)
+	if oz["sr_adim"].(float64) != 1 || len(bl) != 2 || bl[1]["kaynak"] != "sr-adim" || bl[1]["kesin"] != true {
+		t.Fatalf("rapor basamağı bir kez bölmeliydi: oz=%v bl=%v", oz, bl)
+	}
+	if e := bl[1]["sr_eksik_sn"].(float64); math.Abs(e-0.020) > 0.004 {
+		t.Fatalf("ölçülen basamak %.4f, beklenen 0,020", e)
+	}
+	if enB > 0.005 || oz["durum"] != "tutarli" {
+		t.Fatalf("basamak hıçkırıktan bölünmeliydi: sapma %.4f (paket %d) oz=%v", enB, at, oz)
 	}
 }

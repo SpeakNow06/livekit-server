@@ -1367,6 +1367,22 @@ geçemezdi). Sahte SR kaynağı artık yazıcıya İTİYOR (`ilet`, RTCP okuyucu
   (`yayinci.rtpAtla`). Firefox'taki aynı basamak damgasız → orada açık.
 İmaj `v1.11.0-rawrec51`, iki sunucuda.
 
+## 40. rawrec52: RAPOR BASAMAĞI — damgasız akışta (Firefox) bölüm içi kayma (2026-09-21)
+- Firefox (923) açılışta RTP'yi duvar saatine yeniden tabanlıyor, bir kare (20 ms) eksik; damga yok → tek tanık
+  SR. `saat.go srGeldi` yeni dal (`anchorKesin && actPaket == 0 && (Kesin || Sira 0)`): SR sapması (SR tabanı −
+  mevcut taban) `srSapma` dizisinde; SON 3 ortalaması ÖNCEKİ 3'ten > 15 ms ayrılır ve iki grup ≤ 10 ms yayılımda
+  tutarlıysa bölüm ORTADAN bölünür (`sr-adim`, kesin, `SrEksikSn` = adım). Bölme noktası: "sonra" aralıklarının
+  en büyük varış hıçkırığı (`hicKaydi`, ≥ 10 ms), yoksa ilk aralığın kaydı, yoksa şimdi. `rawrec.go srIsle`:
+  `sr-adim` ise pts ≥ bölme olan kuyruk öğeleri kayar ve yeni bölüme geçer. Diziyi çapa SR'ları (±d/2) ve
+  kesinleştiren SR (0) besler; yeni bölümde sıfırlanır. İki TAM grup şart (tek SR'lı taban salınım taşır).
+- ⚠ Ölçümle seçildi: "art arda 2 SR 10 ms" 911T'de (gerçek Chrome SR: −16…+3 ms, std 6,5) 72 yanlış tetik; grup
+  kuralı 911T 0, 911A 2 (~17 ms, ölçütler aynı/daha iyi), Firefox 923 1 (−20,7), Safari 922/917 0 (Safari SR
+  salınımı ±15 ms — eşiğe yakın, izlenecek), Chrome 921/916 0. Damgalı akışta kapalı (damga 10 ms'de görür).
+- Yazma gecikmesi 20 → 25 sn (onay 3 SR ≈ 15 sn sonra). İyileşme: eşik altı kısa durmalar (sinyalsiz 1 sn,
+  sinyalli 0,1 sn) artık düzeliyor — `TestSesDurmaSinyalsizKisa`/`…Sinyalli` beklentileri güncellendi; yeni
+  `TestSesSRAdimFirefox`; `TestSes911A` bölüm sayısı ≤ 8. Öz denetim `sr_adim`.
+İmaj `v1.11.0-rawrec52`, iki sunucuda.
+
 ## Rebuild
 ```bash
 cd livekit-server-source            # bu repo, branch speaknow-vp9-simulcast
