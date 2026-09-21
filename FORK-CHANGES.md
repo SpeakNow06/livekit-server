@@ -1321,6 +1321,16 @@ geçemezdi). Sahte SR kaynağı artık yazıcıya İTİYOR (`ilet`, RTCP okuyucu
   (ilk paket dışında sapma 0; ilk paket varışta kalır).
 İmaj `v1.11.0-rawrec47`.
 
+## 36. rawrec48: seyrek yakalama saatinde ses bölüm tabanı (BUG, kayıt 919) (2026-09-21)
+- **BUG (rawrec43-47):** `saat.go` 0. yol `pts = sonPts + dYak` — `dYak` son YAKALAMA paketinden ölçülüyor,
+  `sonPts` son paketin yeri; yakalama seyrekse (Chrome ~1/sn, 919: 37/1706) aradaki süre bir kez daha
+  ekleniyordu → dosya 2,0 sn uzun, öz denetim "zaman-tutarsız", postprocess kapısı SFU dosyasını eleyip
+  tarayıcı kopyasına düştü (kapı işini yaptı). Testler her pakette yakalama kullanıyordu (görünmedi).
+  Düzeltme: `pts += sureOrnek(eksikYak)` (RTP'ye göre yer + ölçülen durma); bayat-act dalı da aynı.
+- Test `TestSesYakalamaSaatiSeyrek` (`yayinci.actHer = 50`, durma son yakalama paketinden 49 paket sonra;
+  sapma 0, bölüm `act`, öz denetim tutarlı).
+İmaj `v1.11.0-rawrec48`.
+
 ## Rebuild
 ```bash
 cd livekit-server-source            # bu repo, branch speaknow-vp9-simulcast

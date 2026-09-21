@@ -207,7 +207,14 @@ func (s *sesSaat) yerlestir(rtp uint32, gelis time.Time, seq uint16, yedek bool,
 		eksikYak := dYak - time.Duration(sdelta(rtp, s.sonYakRTP)*int64(time.Second)/s.hz)
 		switch {
 		case eksikYak > actEsik:
-			pts = s.sonPts + s.sureOrnek(dYak)
+			// YER = RTP'ye göre yer + ölçülen durma. ⚠ rawrec43-47 burada
+			// `sonPts + dYak` yazıyordu; yakalama saati SEYREKSE (Chrome
+			// ~1/sn, DTX'te daha seyrek) son yakalama paketi ile son paket
+			// arasındaki süre bir kez daha ekleniyordu (kayıt 919: dosya
+			// 2,0 sn uzun, öz denetim "tutarsız", postprocess tarayıcı
+			// kopyasına düştü). Testler her pakette yakalama kullandığı
+			// için görünmedi; `TestSesYakalamaSaatiSeyrek` bunu tutuyor.
+			pts += s.sureOrnek(eksikYak)
 			e := eksikYak.Seconds()
 			yeni = &sesBolum{Sira: len(s.bolumler), RTP0: rtp, Pts0: pts, Kaynak: "act",
 				VarisEksikSn: eksik.Seconds(), SrEksikSn: &e, Kesin: true,
@@ -217,8 +224,9 @@ func (s *sesSaat) yerlestir(rtp uint32, gelis time.Time, seq uint16, yedek bool,
 			b = yeni
 		case eksikYak < -actEsik && !b.Kesin && b.Paket <= 3 && b.Sira > 0:
 			// Bayat ilk paket (bkz. aşağıdaki varış kuralı) — yakalama
-			// saatiyle kesin.
-			duz := s.sonPts + s.sureOrnek(dYak)
+			// saatiyle kesin. Seyrek yakalamada da doğru: RTP'ye göre yer +
+			// ölçülen (negatif) fark.
+			duz := pts + s.sureOrnek(eksikYak)
 			b.Pts0 += duz - pts
 			pts = duz
 			s.bayat++

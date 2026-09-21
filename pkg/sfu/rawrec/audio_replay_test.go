@@ -285,6 +285,9 @@ type yayinci struct {
 	// duvar − 40 ms (sabit yakalama→sunucu gecikmesi); yayıncı saati sunucudan
 	// 3 saat geride (ofsetin önemi olmadığını gösterir).
 	act bool
+	// actHer — yakalama saati her N. pakette (0 = her pakette). Chrome ~1/sn
+	// yazar (libwebrtc AbsoluteCaptureTimeSender 1 sn aralığı): 50.
+	actHer int
 }
 
 func yeniYayinci(t0 time.Time, rtp0 uint32) *yayinci {
@@ -296,7 +299,7 @@ func (y *yayinci) paket() spaket {
 	if y.jitter != nil {
 		p.gelis = p.gelis.Add(y.jitter(y.n))
 	}
-	if y.act {
+	if y.act && (y.actHer == 0 || y.n%y.actHer == 0) {
 		p.yak = y.wallNs - 40*int64(time.Millisecond) - 3*int64(time.Hour)
 	}
 	y.dogru = append(y.dogru, (y.wallNs-y.wall0)*48000/int64(time.Second))
@@ -1319,5 +1322,40 @@ func TestSesErkenIlkPaket(t *testing.T) {
 	}
 	if ilk < 0.19 || ilk > 0.21 {
 		t.Fatalf("ilk paket varışta kalmalı (~0,2 sn): %.3f", ilk)
+	}
+}
+
+// TestSesYakalamaSaatiSeyrek — Chrome yakalama saatini ~1/sn yazar (kayıt 919:
+// 37/1706). Durma, son yakalama paketinden 0,98 sn sonra başlar; eski formül
+// (`sonPts + dYak`) o süreyi bir kez daha ekleyip dosyayı uzatıyordu.
+// Açılış sonrası ilk paket yakalama saati taşır (>1 sn boşluk), bölüm "act".
+func TestSesYakalamaSaatiSeyrek(t *testing.T) {
+	k := &sahteSesKaynak{}
+	y := yeniYayinci(t0(), 500_000)
+	y.act = true
+	y.actHer = 50
+	d := dizi(k, y, 800, 100, func(i int, y *yayinci) bool {
+		if i == 399 { // son yakalama paketi i=350: durma ondan 49 paket sonra
+			y.dur(45000)
+			return true
+		}
+		return false
+	})
+	// Açılış sonrası ilk paket yakalama saati taşısın (Chrome: 1 sn'den uzun
+	// aradan sonraki ilk pakette gönderir).
+	d[399].yak = d[399].gelis.UnixNano() - 40*int64(time.Millisecond) - 3*int64(time.Hour)
+	pk, yan := sesKos(t, k, d)
+	enB, at := enBuyukSapma(t, pk, y.dogru)
+	oz := ozDenetim(t, yan)
+	bl := bolumler(t, yan)
+	t.Logf("seyrek yakalama: sapma %.4f (paket %d) oz=%v", enB, at, oz)
+	if len(bl) != 2 || bl[1]["kaynak"] != "act" || bl[1]["kesin"] != true {
+		t.Fatalf("durma yakalama saatiyle kesin olmalıydı: %v", bl)
+	}
+	if enB > 0.002 {
+		t.Fatalf("seyrek yakalamada sapma %.4f sn (eski formül ~0,98 sn şaşırırdı)", enB)
+	}
+	if oz["durum"] != "tutarli" {
+		t.Fatalf("öz denetim tutarlı olmalı: %v", oz)
 	}
 }
