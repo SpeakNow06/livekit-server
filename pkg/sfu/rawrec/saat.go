@@ -135,7 +135,10 @@ type sesSaat struct {
 	// zaten durmuyor.
 	sonYak      int64  // son (yedek olmayan) paketin yakalanma anı, 0 = yok
 	sonYakRTP   uint32 // o paketin RTP'si
+	sonYakPts   int64  // o paketin dosyadaki yeri: yakalama saatiyle yer = sonYakPts + Δyakalama
+	sonYakBolum int    // o paketin bölümü (SR kayması olursa sonYakPts de kayar; referans bölümden önceyse geçici bölüm kesinleşir)
 	actPaket    int    // yakalama saatli paket sayısı
+	actBayat    int    // bayat yakalama saati: varış "durdu" dedi, damga onaylamadı (rawrec49, kayıt 920)
 	paketSayisi int    // yedek dışı toplam paket
 }
 
@@ -169,7 +172,9 @@ func (s *sesSaat) muteSinyali() { s.muteBekliyor = true }
 
 // yerlestir — paketin dosya içindeki yerini (pts) verir; yeni bölüm
 // açıldıysa onu döner. `yedek` (RED yedek bloğu) durumu değiştirmez.
-func (s *sesSaat) yerlestir(rtp uint32, gelis time.Time, seq uint16, yedek bool, yakNs int64) (int64, *sesBolum) {
+// Son iki dönüş: yakalama saati geçici bir bölümü kesinleştirdiyse o bölüm ve
+// kayma (örnek) — yazıcı kuyruktaki paketleri SR'daki gibi kaydırır.
+func (s *sesSaat) yerlestir(rtp uint32, gelis time.Time, seq uint16, yedek bool, yakNs int64) (int64, *sesBolum, *sesBolum, int64) {
 	if !s.var_ {
 		b := &sesBolum{Sira: 0, RTP0: rtp, Pts0: 0, Kaynak: "ilk", IlkGelisNs: gelis.UnixNano()}
 		s.bolumler = append(s.bolumler, b)
@@ -178,13 +183,13 @@ func (s *sesSaat) yerlestir(rtp uint32, gelis time.Time, seq uint16, yedek bool,
 		b.sonRTP, b.sonPts, b.Paket, b.sonGelisNs = rtp, 0, 1, gelis.UnixNano()
 		s.paketSayisi = 1
 		if yakNs > 0 {
-			s.actPaket, s.sonYak, s.sonYakRTP = 1, yakNs, rtp
+			s.actPaket, s.sonYak, s.sonYakRTP, s.sonYakPts, s.sonYakBolum = 1, yakNs, rtp, 0, 0
 		}
-		return 0, nil
+		return 0, nil, nil, 0
 	}
 	b := s.simdiki()
 	if yedek {
-		return b.Pts0 + sdelta(rtp, b.RTP0), nil
+		return b.Pts0 + sdelta(rtp, b.RTP0), nil, nil, 0
 	}
 	s.paketSayisi++
 	dRtp := sdelta(rtp, s.sonRTP)
@@ -199,43 +204,70 @@ func (s *sesSaat) yerlestir(rtp uint32, gelis time.Time, seq uint16, yedek bool,
 	if yakNs > 0 {
 		s.actPaket++
 	}
-	if yakNs > 0 && s.sonYak > 0 {
-		// ── 0. YOL: YAKALAMA SAATİ ── yayıncının kendi saatiyle ölçülen
-		// eksik; kesin, titremesiz. Bölüm hemen "kesin" (SR düzeltmesi
-		// gerekmez), varış tahmini karşılaştırma için kaydedilir.
-		dYak := time.Duration(yakNs - s.sonYak)
-		eksikYak := dYak - time.Duration(sdelta(rtp, s.sonYakRTP)*int64(time.Second)/s.hz)
+	// ── 0. YOL: YAKALAMA SAATİ ── yayıncının kendi saatiyle ölçülen yer;
+	// kesin, titremesiz. `dogru` = son yakalama paketinin yeri + iki damga
+	// arası; `kayma` = bununla RTP'ye göre yer arasındaki fark.
+	actVar := yakNs > 0 && s.sonYak > 0
+	var dogru, kayma int64
+	var kaymaBolum *sesBolum
+	if actVar {
+		dogru = s.sonYakPts + s.sureOrnek(time.Duration(yakNs-s.sonYak))
+		kayma = dogru - pts
+		if eksik > esik && kayma <= s.sureOrnek(actEsik) {
+			// BAYAT YAKALAMA SAATİ (rawrec49, kayıt 920): varış "akış durdu"
+			// diyor, bu paketin damgası "hiç durmadı" diyor. Chrome'da
+			// susturma öncesi yarım kalan 10 ms'lik çerçevenin damgası
+			// (libwebrtc ACM `absolute_capture_timestamp_ms_` yapışkan) açılış
+			// sonrası İLK pakete yapışıyor; damga susturma ÖNCESİNİN saati.
+			// Güvenilmez: varış yoluna düş, referans (sonYak) GÜNCELLENMEZ;
+			// bir sonraki gerçek damga geçici bölümü kesinleştirir. (Gerçek
+			// bir 3 sn+ ağ kesintisi de aynı görünür; o zaman da bir sonraki
+			// damga bölümü geri çeker — sonuç yine doğru.)
+			actVar = false
+			s.actBayat++
+		}
+	}
+	if actVar {
 		switch {
-		case eksikYak > actEsik:
-			// YER = RTP'ye göre yer + ölçülen durma. ⚠ rawrec43-47 burada
-			// `sonPts + dYak` yazıyordu; yakalama saati SEYREKSE (Chrome
-			// ~1/sn, DTX'te daha seyrek) son yakalama paketi ile son paket
-			// arasındaki süre bir kez daha ekleniyordu (kayıt 919: dosya
-			// 2,0 sn uzun, öz denetim "tutarsız", postprocess tarayıcı
-			// kopyasına düştü). Testler her pakette yakalama kullandığı
-			// için görünmedi; `TestSesYakalamaSaatiSeyrek` bunu tutuyor.
-			pts += s.sureOrnek(eksikYak)
-			e := eksikYak.Seconds()
+		case !b.Kesin && b.Sira > 0 && s.sonYakBolum < b.Sira:
+			// GEÇİCİ BÖLÜMÜ KESİNLEŞTİR (SR gibi, yayıncının damgasıyla):
+			// referans damga bu bölümden ÖNCE → ölçülen fark bölümün varışla
+			// kurulan tabanının hatası (bayat/erken ilk paket, kuyruk
+			// patlaması, bayat damga). Taban kayar, kuyruk yazıcıda kayar.
+			if kayma != 0 {
+				b.Pts0 += kayma
+				b.sonPts += kayma
+				s.sonPts += kayma
+				s.enSonPts += kayma
+				kaymaBolum = b
+			}
+			pts = dogru
+			b.Kesin = true
+			b.Kaynak += "+act"
+			e := b.VarisEksikSn + s.ornekSn(kayma)
+			b.SrEksikSn = &e
+		case kayma > s.sureOrnek(actEsik):
+			// DURMUŞ SAAT, damgayla kesin: yeni bölüm. ⚠ rawrec43-47 yeri
+			// `sonPts + dYak` diye kuruyordu; damga SEYREKSE (Chrome ~1/sn)
+			// son damgalı paket ile son paket arası bir kez daha ekleniyordu
+			// (kayıt 919: dosya 2,0 sn uzun). `TestSesYakalamaSaatiSeyrek`.
+			e := s.ornekSn(kayma)
+			pts = dogru
 			yeni = &sesBolum{Sira: len(s.bolumler), RTP0: rtp, Pts0: pts, Kaynak: "act",
 				VarisEksikSn: eksik.Seconds(), SrEksikSn: &e, Kesin: true,
 				MuteSinyali: s.muteBekliyor, IlkGelisNs: gelis.UnixNano()}
 			s.bolumler = append(s.bolumler, yeni)
 			s.muteBekliyor = false
 			b = yeni
-		case eksikYak < -actEsik && !b.Kesin && b.Paket <= 3 && b.Sira > 0:
-			// Bayat ilk paket (bkz. aşağıdaki varış kuralı) — yakalama
-			// saatiyle kesin. Seyrek yakalamada da doğru: RTP'ye göre yer +
-			// ölçülen (negatif) fark.
-			duz := pts + s.sureOrnek(eksikYak)
-			b.Pts0 += duz - pts
-			pts = duz
+		case kayma < -s.sureOrnek(actEsik) && !b.Kesin && b.Paket <= 3 && b.Sira > 0:
+			// Bayat ilk paket (referans aynı bölümde) — damgayla kesin.
+			b.Pts0 += kayma
+			pts = dogru
 			s.bayat++
 		}
-		s.sonYak, s.sonYakRTP = yakNs, rtp
-		return s.bitir(b, rtp, gelis, seq, pts, dRtp, yeni)
-	}
-	if yakNs > 0 {
-		s.sonYak, s.sonYakRTP = yakNs, rtp
+		p, y := s.bitir(b, rtp, gelis, seq, pts, dRtp, yeni)
+		s.sonYak, s.sonYakRTP, s.sonYakPts, s.sonYakBolum = yakNs, rtp, p, b.Sira
+		return p, y, kaymaBolum, kayma
 	}
 	switch {
 	case eksik > esik:
@@ -269,7 +301,12 @@ func (s *sesSaat) yerlestir(rtp uint32, gelis time.Time, seq uint16, yedek bool,
 		pts = duz
 		s.erken++
 	}
-	return s.bitir(b, rtp, gelis, seq, pts, dRtp, yeni)
+	p, y := s.bitir(b, rtp, gelis, seq, pts, dRtp, yeni)
+	if yakNs > 0 && s.sonYak == 0 {
+		// İlk damga: referans (bayat şüphelisi buraya düşmez, referansı korur).
+		s.sonYak, s.sonYakRTP, s.sonYakPts, s.sonYakBolum = yakNs, rtp, p, s.simdiki().Sira
+	}
+	return p, y, nil, 0
 }
 
 // bitir — paketin durumunu işle (ortak kuyruk).
@@ -405,6 +442,9 @@ func (s *sesSaat) srGeldi(sr *livekit.RTCPSenderReportState) (*sesBolum, int64) 
 		}
 		s.sonPts += kayma
 		s.enSonPts += kayma
+		if s.sonYakBolum >= b.Sira {
+			s.sonYakPts += kayma
+		}
 		ptsSR += kayma
 	}
 	if len(s.gunluk) < srGunluguUstSinir {
@@ -425,6 +465,7 @@ func (s *sesSaat) ozDenetim() map[string]any {
 		"sr_atlanan":  s.srAtlanan,
 		"bayat_paket": s.bayat,
 		"erken_paket": s.erken,
+		"act_bayat":   s.actBayat,
 		"act_paket":   s.actPaket,
 	}
 	if s.paketSayisi > 0 {

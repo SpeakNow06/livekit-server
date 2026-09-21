@@ -621,7 +621,20 @@ func (w *Writer) loop() {
 			gorulenMute = n
 			saat.muteSinyali()
 		}
-		pts, yeni := saat.yerlestir(p.rtp, p.geliş, p.seq, p.yedek, p.yakalamaNs)
+		pts, yeni, kb, kayma := saat.yerlestir(p.rtp, p.geliş, p.seq, p.yedek, p.yakalamaNs)
+		if kb != nil && kayma != 0 {
+			// Yakalama saati geçici bölümü kesinleştirdi (SR'daki gibi):
+			// kuyruktaki o bölümün paketleri kayar.
+			for i := range kuyruk {
+				if kuyruk[i].bolum != nil && kuyruk[i].bolum.Sira >= kb.Sira {
+					kuyruk[i].pts += kayma
+				}
+			}
+			w.log.Infow("rawrec ses: bölüm tabanı yakalama saatiyle kesinleşti",
+				"track", w.trackID, "sid", w.sid, "bolum", kb.Sira,
+				"kayma_ms", yuvarla(saat.ornekSn(kayma)*1000),
+				"varis_eksik_sn", yuvarla(kb.VarisEksikSn), "sr_eksik_sn", yuvarla(*kb.SrEksikSn))
+		}
 		if p.yedek {
 			// Kopya mı delik mi: atanmış en büyük pts'nin gerisindeyse ya da
 			// eşitse zaten var (kuyrukta ya da dosyada) → at.

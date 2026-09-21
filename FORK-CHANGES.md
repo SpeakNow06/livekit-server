@@ -1331,6 +1331,25 @@ geçemezdi). Sahte SR kaynağı artık yazıcıya İTİYOR (`ilet`, RTCP okuyucu
   sapma 0, bölüm `act`, öz denetim tutarlı).
 İmaj `v1.11.0-rawrec48`.
 
+## 37. rawrec49: BAYAT YAKALAMA SAATİ — damga geçici bölümü SR gibi kesinleştirir (2026-09-21, kayıt 920)
+- **Bulgu (920, Chrome 152):** susturma sonrası İLK paketin abs-capture-time damgası susturma ÖNCESİNİN saati
+  (libwebrtc ACM `absolute_capture_timestamp_ms_` yapışkan: yarım kalan 10 ms'lik çerçevenin damgası açılışta
+  tamamlanan pakete yapışıyor). Eşleyici o paketi "durma yok" sanıp RTP'ye göre 48 sn ERKEN koydu (varış
+  kuralı damga yolunda hiç çalışmıyordu), bölümü 2. paketin gerçek damgasıyla açtı → sidecar
+  `varis_eksik=-0.020 / sr_eksik=48.245`. Zarar tek 20 ms'lik kare; ama 2. paket kaybolsaydı bütün bölüm 48 sn
+  erken kalırdı (SR düzeltmesi de Kesin/Sira 0 yüzünden çalışmazdı).
+- **Kural:** varış "durdu" diyor (`eksik > eşik`) ama damga "durmadı" diyorsa (`kayma ≤ 100 ms`) damga BAYAT
+  sayılır (`act_bayat++`), varış yoluna düşülür, referans (`sonYak`) güncellenmez. Damga yolu artık
+  `dogru = sonYakPts + Δdamga`, `kayma = dogru − RTP'ye göre yer` ile çalışır; referans damga geçici bölümden
+  ÖNCEYSE (`sonYakBolum < b.Sira`) bölüm SR gibi kesinleştirilir (taban + kuyruk kayar, `+act`, yeni
+  `yerlestir` dönüşü → `kuyrugaAl` kaydırır, log "bölüm tabanı yakalama saatiyle kesinleşti"); değilse
+  `kayma > 100 ms` yeni "act" bölümü; `kayma < −100 ms` ilk 3 pakette bayat. SR kayması `sonYakPts`i de kaydırır.
+- Yan etki: 2,5 sn kuyruk patlamasında (`TestSesYakalamaSaatiDTXKayipPatlama`) ilk paketin damgası da "şüpheli"
+  → geçici bölüm açılıp bir sonraki damgayla 2,5 sn geri çekilir (sonuç aynı, `varis+act`).
+- Testler: `TestSesYakalamaSaatiBayatDamga` (920 modeli, 2. paket gerçek damga), `…BayatDamgaKayip` (2. paket
+  kayıp, damga 1 sn sonra — eski kod 48 sn erken kalırdı). Öz denetim `act_bayat`.
+İmaj `v1.11.0-rawrec49`.
+
 ## Rebuild
 ```bash
 cd livekit-server-source            # bu repo, branch speaknow-vp9-simulcast

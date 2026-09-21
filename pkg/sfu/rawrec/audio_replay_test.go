@@ -1033,8 +1033,14 @@ func TestSesYakalamaSaatiDTXKayipPatlama(t *testing.T) {
 	pk, yan := sesKos(t, k, d)
 	enB, at := enBuyukSapma(t, pk, y.dogru)
 	oz := ozDenetim(t, yan)
-	if enB > 0.0005 || oz["bolum"].(float64) != 1 {
-		t.Fatalf("yakalama saatiyle bölüm açılmamalıydı: sapma %.4f (paket %d) oz=%v", enB, at, oz)
+	bl := bolumler(t, yan)
+	// rawrec49: 2,5 sn'lik patlamada ilk paketin damgası "durmadı" diyor,
+	// varış "durdu" → damga şüpheli sayılır, varışla geçici bölüm açılır;
+	// bir sonraki damga bölümü 2,5 sn geri çekip kesinleştirir (kuyruk
+	// kayar). Sonuç: yer yine tam, bölüm "varis+act".
+	t.Logf("DTX+kayıp+patlama: sapma %.4f (paket %d) oz=%v bl=%v", enB, at, oz, bl)
+	if enB > 0.0005 || len(bl) != 2 || bl[1]["kaynak"] != "varis+act" || bl[1]["kesin"] != true || oz["act_bayat"].(float64) != 1 {
+		t.Fatalf("patlama damgayla geri çekilmeliydi: sapma %.4f (paket %d) oz=%v bl=%v", enB, at, oz, bl)
 	}
 }
 
@@ -1357,5 +1363,89 @@ func TestSesYakalamaSaatiSeyrek(t *testing.T) {
 	}
 	if oz["durum"] != "tutarli" {
 		t.Fatalf("öz denetim tutarlı olmalı: %v", oz)
+	}
+}
+
+// ── rawrec49: BAYAT YAKALAMA SAATİ (kayıt 920) ──────────────────────────────
+
+// bayatDamgaDizisi — seyrek damga (Chrome ~1/sn), 48 sn susturma; açılış
+// sonrası İLK paketin damgası BAYAT (susturma öncesi son çerçevenin saati,
+// libwebrtc ACM yapışkan damga), sonraki gerçek damga `ikinciDamga`
+// numaralı pakette. `kayip` verilirse o paketler gönderilmez.
+func bayatDamgaDizisi(k *sahteSesKaynak, y *yayinci, ikinciDamga int, kayip map[int]bool) []spaket {
+	y.act = true
+	y.actHer = 50
+	var d []spaket
+	var sonYak int64
+	for i := 0; i < 700; i++ {
+		if i == 400 {
+			y.dur(48000)
+		}
+		p := y.paket()
+		p.mute = i == 400
+		if i == 400 {
+			// BAYAT: susturma öncesi son damga (i=350) + 50 paket, sanki hiç durulmamış
+			p.yak = sonYak + int64(400-350)*20*int64(time.Millisecond)
+		} else if i == ikinciDamga {
+			p.yak = y.wallNs - 20*int64(time.Millisecond) - 40*int64(time.Millisecond) - 3*int64(time.Hour)
+		}
+		if p.yak != 0 && i != 400 {
+			sonYak = p.yak
+		}
+		if i%100 == 0 && i != 400 { // 400'de SR olsa damgadan önce o kesinleştirirdi (test damgayı ölçüyor)
+			y.srEkle(k)
+		}
+		if !kayip[i] {
+			d = append(d, p)
+		}
+	}
+	return d
+}
+
+// TestSesYakalamaSaatiBayatDamga — 920 modeli: ilk paket bayat damgalı →
+// damga şüpheli, varışla geçici bölüm; 2. paketin gerçek damgası bölümü
+// kesinleştirir. Bütün paketler (ilk dahil) yerinde.
+func TestSesYakalamaSaatiBayatDamga(t *testing.T) {
+	k := &sahteSesKaynak{}
+	y := yeniYayinci(t0(), 500_000)
+	d := bayatDamgaDizisi(k, y, 401, nil)
+	pk, yan := sesKos(t, k, d)
+	enB, at := enBuyukSapma(t, pk, y.dogru)
+	oz := ozDenetim(t, yan)
+	bl := bolumler(t, yan)
+	t.Logf("bayat damga: sapma %.4f (paket %d) kaynak=%v oz=%v", enB, at, bl[len(bl)-1]["kaynak"], oz)
+	if len(bl) != 2 || bl[1]["kaynak"] != "mute+varis+act" || bl[1]["kesin"] != true || oz["act_bayat"].(float64) != 1 {
+		t.Fatalf("bayat damga elenip bölüm 2. damgayla kesinleşmeliydi: kaynak=%v oz=%v", bl[len(bl)-1]["kaynak"], oz)
+	}
+	if enB > 0.002 || oz["durum"] != "tutarli" {
+		t.Fatalf("sapma %.4f sn / oz=%v", enB, oz)
+	}
+}
+
+// TestSesYakalamaSaatiBayatDamgaKayip — aynısı, ama 2. paket (gerçek damga)
+// KAYIP; sonraki damga 1 sn sonra (450). Geçici bölüm o damgayla kesinleşir,
+// aradaki 49 paket kuyrukta kayar. Eski kod: 1 sn boyunca ve sonrasında
+// bütün bölüm 48 sn ERKEN kalırdı (bayat damga varış kuralını susturuyordu).
+func TestSesYakalamaSaatiBayatDamgaKayip(t *testing.T) {
+	k := &sahteSesKaynak{}
+	y := yeniYayinci(t0(), 500_000)
+	d := bayatDamgaDizisi(k, y, 450, map[int]bool{401: true})
+	dir := t.TempDir()
+	w := yeniSesYazici(t, dir, k, false)
+	yol := sesBesle(t, w, k, dir, d, birBlok)
+	k.ilet(w, 1<<62)
+	w.Close()
+	pk, yan := oggPaketleriOku(t, yol), yanOku(t, yol)
+	// dogru dizisi 401'i de içeriyor; çıktıda o paket yok → hizala
+	dogru := append(append([]int64{}, y.dogru[:401]...), y.dogru[402:]...)
+	enB, at := enBuyukSapma(t, pk, dogru)
+	oz := ozDenetim(t, yan)
+	bl := bolumler(t, yan)
+	t.Logf("bayat damga + kayıp: sapma %.4f (paket %d) oz=%v bl=%v", enB, at, oz, bl)
+	if len(bl) != 2 || bl[1]["kesin"] != true || oz["act_bayat"].(float64) != 1 {
+		t.Fatalf("bölüm sonraki damgayla kesinleşmeliydi: oz=%v bl=%v", oz, bl)
+	}
+	if enB > 0.002 || oz["durum"] != "tutarli" {
+		t.Fatalf("sapma %.4f sn / oz=%v", enB, oz)
 	}
 }
