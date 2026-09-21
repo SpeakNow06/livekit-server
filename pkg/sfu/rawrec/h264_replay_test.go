@@ -64,6 +64,12 @@ func gercekH264(t *testing.T, dir string) []h264Erisim {
 	cmd := exec.Command(ffmpeg, "-y", "-v", "error", "-f", "lavfi",
 		"-i", "testsrc=size=320x240:rate=15", "-t", "2",
 		"-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+		// tek dilim/kare: zerolatency'nin dilimli iş parçacıkları kareyi
+		// birkaç NAL'a bölüyor; baş-kaybı testi karenin İLK paketinin FU-A
+		// başlangıcı olmasını istiyor (tarayıcı yayınlarında da öyle).
+		// `qp=0` (kayıpsız): testsrc'nin fark kareleri aksi hâlde tek pakete
+		// sığıyor, kayıp testleri çok parçalı kare bulamayıp atlanıyordu.
+		"-x264-params", "sliced-threads=0:qp=0",
 		"-g", "12", "-bf", "0", "-pix_fmt", "yuv420p", "-f", "h264", ham)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Skipf("ffmpeg H.264 üretemedi (libx264 yok?): %v %s", err, out)
@@ -118,7 +124,7 @@ func h264Paketle(aus []h264Erisim) []tpaket {
 	return out
 }
 
-func yeniH264Yazici(t *testing.T, dir string) *VideoWriter {
+func yeniH264Yazici(t *testing.T, dir string) (*VideoWriter, *sahteKaynak) {
 	t.Helper()
 	paketiEtkinlestir(t, dir)
 	kaynak := &sahteKaynak{sr: &livekit.RTCPSenderReportState{
@@ -133,7 +139,55 @@ func yeniH264Yazici(t *testing.T, dir string) *VideoWriter {
 		t.Fatalf("H.264 yazıcı kurulamadı")
 	}
 	w.KatmanKaydet(0, kaynak)
-	return w
+	return w, kaynak
+}
+
+// anahtarKadarAtilan — `k` karesi bozuk düştüyse yazıcının atması gereken kare
+// sayısı: k'nin kendisi + sonraki anahtar kareye kadar bütün fark kareleri
+// (rawrec53 "kayıptan sonra anahtar kare bekle" kuralı, video.go kayipDurumu).
+func anahtarKadarAtilan(aus []h264Erisim, k int) int {
+	n := 1
+	for j := k + 1; j < len(aus) && !aus[j].anahtar; j++ {
+		n++
+	}
+	return n
+}
+
+// h264KayipTesti — `dusur` paket indeksini akıştan çıkar; yazıcı bozuk
+// kareyi VE sonraki anahtar kareye kadarki fark karelerini atmalı, PLI
+// istemeli, dosya ffprobe'da hatasız çözülmeli. Temiz geçişle PLI sayısı
+// karşılaştırılıyor (hedef bulunca atılan tek atımlık PLI'yı ayıklamak için).
+func h264KayipTesti(t *testing.T, aus []h264Erisim, paketler []tpaket, dusur int, dirTemiz, dirKayip string) {
+	t.Helper()
+	wT, kT := yeniH264Yazici(t, dirTemiz)
+	for _, p := range paketler {
+		wT.Write(p.payload, p.rtp, p.marker, p.anahtar, p.seq, p.katman, 0)
+	}
+	dosyaBekle(t, filepath.Join(dirTemiz, "camraw_1", "*.ts"))
+	wT.Close()
+	pliTemiz := kT.pli
+
+	dusen := paketler[dusur].kare
+	w, kaynak := yeniH264Yazici(t, dirKayip)
+	for i, p := range paketler {
+		if i == dusur {
+			continue
+		}
+		w.Write(p.payload, p.rtp, p.marker, p.anahtar, p.seq, p.katman, 0)
+	}
+	yol := dosyaBekle(t, filepath.Join(dirKayip, "camraw_1", "*.ts"))
+	w.Close()
+	_, _, _, kare, _ := tsProbe(t, yol)
+	beklenen := len(aus) - anahtarKadarAtilan(aus, dusen)
+	t.Logf("düşürülen paket=%d kare=%d çözülen=%d/%d beklenen=%d pli temiz=%d kayıp=%d",
+		dusur, dusen, kare, len(aus), beklenen, pliTemiz, kaynak.pli)
+	if kare != beklenen {
+		t.Fatalf("çözülen kare %d, beklenen %d (bozuk kare + anahtar kareye kadarki fark kareleri atılmalıydı)",
+			kare, beklenen)
+	}
+	if kaynak.pli <= pliTemiz {
+		t.Fatalf("kayıptan sonra PLI istenmedi (temiz %d, kayıplı %d)", pliTemiz, kaynak.pli)
+	}
 }
 
 // tsProbe — ffprobe ile çöz: (kodek, en, boy, çözülen kare, pts listesi).
@@ -189,7 +243,7 @@ func TestH264GercekAkisTS(t *testing.T) {
 	paketler := h264Paketle(aus)
 	t.Logf("erişim birimi=%d rtp paketi=%d", len(aus), len(paketler))
 
-	w := yeniH264Yazici(t, dir)
+	w, _ := yeniH264Yazici(t, dir)
 	for _, p := range paketler {
 		w.Write(p.payload, p.rtp, p.marker, p.anahtar, p.seq, p.katman, 0)
 	}
@@ -240,21 +294,38 @@ func TestH264ParcaKaybiKareAtilir(t *testing.T) {
 	if hedef < 0 {
 		t.Skip("çok parçalı anahtar olmayan kare bulunamadı")
 	}
-	dusen := paketler[hedef].kare
-	w := yeniH264Yazici(t, dir)
-	for i, p := range paketler {
-		if i == hedef {
+	h264KayipTesti(t, aus, paketler, hedef, t.TempDir(), t.TempDir())
+}
+
+// TestH264BasKaybiKareAtilir — karenin İLK paketi (FU-A başlangıç parçası)
+// kaybolursa (rawrec53, kayıt 929): pion kalan parçaları yine birleştirir,
+// başlığı çöp bir "dilim" çıkar. Yazıcı kareyi ve sonraki anahtar kareye
+// kadarki fark karelerini atmalı; ffprobe hatasız çözmeli (929'daki dosyada
+// "non-existing PPS 3 referenced" veriyordu).
+func TestH264BasKaybiKareAtilir(t *testing.T) {
+	dir := t.TempDir()
+	aus := gercekH264(t, dir)
+	paketler := h264Paketle(aus)
+	// Anahtar olmayan, İLK paketi FU-A başlangıcı olan bir kare.
+	hedef := -1
+	for k := 5; k < len(aus) && hedef < 0; k++ {
+		var idx []int
+		for i, p := range paketler {
+			if p.kare == k {
+				idx = append(idx, i)
+			}
+		}
+		if aus[k].anahtar || len(idx) < 3 {
 			continue
 		}
-		w.Write(p.payload, p.rtp, p.marker, p.anahtar, p.seq, p.katman, 0)
+		if y := paketler[idx[0]].payload; len(y) >= 2 && y[0]&0x1f == 28 && y[1]&0x80 != 0 {
+			hedef = idx[0]
+		}
 	}
-	yol := dosyaBekle(t, filepath.Join(dir, "camraw_1", "*.ts"))
-	w.Close()
-	_, _, _, kare, _ := tsProbe(t, yol)
-	t.Logf("düşürülen kare=%d çözülen=%d/%d", dusen, kare, len(aus))
-	if kare != len(aus)-1 {
-		t.Fatalf("çözülen kare %d, beklenen %d (bozuk kare atılmalıydı)", kare, len(aus)-1)
+	if hedef < 0 {
+		t.Skip("ilk paketi FU-A başlangıcı olan çok parçalı kare bulunamadı")
 	}
+	h264KayipTesti(t, aus, paketler, hedef, t.TempDir(), t.TempDir())
 }
 
 // TestTsPythonBirebir — Go TS yazıcısı == tarayıcı yolunun Python `_TsWriter`'ı.

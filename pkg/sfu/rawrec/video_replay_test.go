@@ -215,14 +215,17 @@ func yeniTestYazici(t *testing.T, dir string, ustKatman int32) (*VideoWriter, *s
 	return w, kaynak
 }
 
-// altinSHA256 — refactor ÖNCESİ (commit 5083f6dd + bu düzenek) alınan değer:
-// 18017 bayt, 115 kare; üç tekrarda aynı çıktı. Boşsa test yalnız yazdırır;
-// doluysa birebir karşılaştırır. Kasıtlı bir çıktı değişikliğinde (yeni kap,
-// yeni damga kuralı) bu değer GEREKÇESİYLE güncellenmeli.
-const altinSHA256 = "e3862b35b7684f954bba01f31bdf73df35f37e5e1ff40b643898cedd03d82d2e"
+// altinSHA256 — refactor ÖNCESİ (commit 5083f6dd + bu düzenek) alınan değer
+// 18017 bayt / 115 kare idi (e3862b35…). rawrec53 (2026-09-21, kayıt 929)
+// çıktıyı KASITLI değiştirdi: kayıptan sonra anahtar kareye kadar fark
+// karesi yazılmıyor → k=40 (eksik paket) sonrası 41..50 ve k=90 (başsız)
+// sonrası 91..98 de atılıyor, 97 kare. Boşsa test yalnız yazdırır; doluysa
+// birebir karşılaştırır. Kasıtlı bir çıktı değişikliğinde (yeni kap, yeni
+// damga kuralı) bu değer GEREKÇESİYLE güncellenmeli.
+const altinSHA256 = "5b1adf992b293bdd28503b964306a364658a45038d342b276bcd989295544e1e"
 
 // altinKare — aynı çalıştırmadaki kare sayısı.
-const altinKare = 115
+const altinKare = 97
 
 func TestReplayTekKatmanBirebir(t *testing.T) {
 	dir := t.TempDir()
@@ -242,11 +245,12 @@ func TestReplayTekKatmanBirebir(t *testing.T) {
 		t.Fatalf("başlıktaki kare sayısı (%d) dosyadakiyle (%d) tutmuyor",
 			basliktaKare, len(kareler))
 	}
-	// Beklenen davranış — dizideki kenar hâller:
-	//   120 kare − ilk 3 (anahtar kare öncesi) − 1 (k=40 eksik paket)
-	//   − 1 (k=90 başsız) = 115
-	if len(kareler) != 115 {
-		t.Fatalf("kare sayısı %d, beklenen 115", len(kareler))
+	// Beklenen davranış — dizideki kenar hâller (rawrec53 kuralıyla):
+	//   120 kare − ilk 3 (anahtar kare öncesi)
+	//   − 1 (k=40 eksik paket) − 10 (41..50: anahtar kare 51'e kadar dayanaksız)
+	//   − 1 (k=90 başsız)      −  8 (91..98: anahtar kare 99'a kadar) = 97
+	if len(kareler) != altinKare {
+		t.Fatalf("kare sayısı %d, beklenen %d", len(kareler), altinKare)
 	}
 	for i := 1; i < len(kareler); i++ {
 		if kareler[i][0] <= kareler[i-1][0] {
@@ -304,9 +308,10 @@ func TestReplayIkiKatmanSayim(t *testing.T) {
 	yol := dosyaBekle(t, filepath.Join(dir, "share_1", "*.ivf"))
 	_, kareler, _ := ivfOku(t, yol)
 	t.Logf("iki katman: kare=%d", len(kareler))
-	// alt: 60 − 3 (anahtar öncesi) − 1 (k=40 eksik) = 56; üst: 30 → 86
-	if len(kareler) != 56+ustKare {
-		t.Fatalf("kare sayısı %d, beklenen %d", len(kareler), 56+ustKare)
+	// alt: 60 − 3 (anahtar öncesi) − 1 (k=40 eksik) − 10 (41..50, rawrec53:
+	// anahtar kare 51'e kadar dayanaksız) = 46; üst: 30 → 76
+	if len(kareler) != 46+ustKare {
+		t.Fatalf("kare sayısı %d, beklenen %d", len(kareler), 46+ustKare)
 	}
 	for i := 1; i < len(kareler); i++ {
 		if kareler[i][0] <= kareler[i-1][0] {
@@ -342,14 +347,17 @@ func TestVideoYakalamaSaatiKatmanGecisi(t *testing.T) {
 	kareYak := func(k int) int64 { return yak0 + int64(k)*33_366_667 } // ~30 fps
 
 	// alt katman: ilk 60 kare; uzantı SEYREK (Chrome saniyede bir yazıyor —
-	// kayıt 914: 459 karede 20): yalnız her 24. kare taşısın, 59. kare
-	// TAŞIMASIN → eski tarafın anı 48. kareden RTP ile enterpole edilmeli.
+	// kayıt 914: 459 karede 20): yalnız her 24. kare ve 52. kare taşısın,
+	// 59. kare TAŞIMASIN → eski tarafın anı 52. kareden RTP ile enterpole
+	// edilmeli. (48. kare rawrec53'ten beri k=40 kaybının ardından anahtar
+	// kare 51'e kadar atılıyor; damgası dosyaya girmiyor. 24'ten 59'a
+	// enterpolasyon 35 karede 1,17 ms saparak ±1 ms sınırını aşıyordu.)
 	for _, p := range replayDizisi(0) {
 		if p.kare >= 60 {
 			break
 		}
 		yak := int64(0)
-		if p.kare%24 == 0 {
+		if p.kare%24 == 0 || p.kare == 52 {
 			yak = kareYak(p.kare)
 		}
 		w.Write(p.payload, p.rtp, p.marker, p.anahtar, p.seq, p.katman, yak)
@@ -377,17 +385,18 @@ func TestVideoYakalamaSaatiKatmanGecisi(t *testing.T) {
 
 	yol := dosyaBekle(t, filepath.Join(dir, "share_1", "*.ivf"))
 	_, kareler, _ := ivfOku(t, yol)
-	// alt: 60 − 3 (anahtar öncesi) − 1 (k=40 eksik) = 56; üst: 30
-	if len(kareler) != 86 {
-		t.Fatalf("kare sayısı %d, beklenen 86", len(kareler))
+	// alt: 60 − 3 (anahtar öncesi) − 1 (k=40 eksik) − 10 (41..50, rawrec53) = 46; üst: 30
+	if len(kareler) != 76 {
+		t.Fatalf("kare sayısı %d, beklenen 76", len(kareler))
 	}
-	// 56. kare (indeks 55) alt katmanın 59. karesi, 57. kare (indeks 56)
+	// 46. kare (indeks 45) alt katmanın 59. karesi, 47. kare (indeks 46)
 	// üst katmanın ilk karesi: PTS farkı 2 sn = 180000 tık (90 kHz), ±1 ms.
-	fark := int64(kareler[56][0]) - int64(kareler[55][0])
+	fark := int64(kareler[46][0]) - int64(kareler[45][0])
 	if d := fark - 180000; d > 90 || d < -90 {
 		t.Fatalf("katman geçişindeki PTS farkı %d tık (%.3f sn), beklenen 180000 (2,000 sn)", fark, float64(fark)/90000)
 	}
-	// alt katmanda 0,24,48 (0 anahtar öncesi atıldı → 24, 48) + üst 0, 24 = 4
+	// alt katmanda 0,24,48,52 (0 anahtar öncesi, 48 kayıp sonrası atıldı → 24, 52)
+	// + üst 0, 24 = 4
 	j, _ := os.ReadFile(yol[:len(yol)-4] + ".json")
 	if !bytes.Contains(j, []byte(`"act_kare":4`)) {
 		t.Fatalf("yan JSON'da act_kare 4 yok: %s", j[:min(300, len(j))])

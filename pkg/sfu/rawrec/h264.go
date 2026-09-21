@@ -49,6 +49,17 @@ type h264Ayiklayici struct {
 
 var errH264BosParca = errors.New("h264: boş parça")
 
+// errH264BassizParca — karenin İLK paketi FU-A ama S (başlangıç) biti yok:
+// NAL'ın başı, yani dilim başlığı kaybolmuş (rawrec53, kayıt 929). pion böyle
+// parçaları yine de birleştirip başına ÜRETİLMİŞ bir NAL başlığı koyuyor;
+// çıkan "dilim"in başlığı çöp (929'da `first_mb=4, pps_id=3`) ve Chrome'un
+// çözücüsü bunu görünce öğeyi KALICI kapatıyor (PIPELINE_ERROR_DECODE).
+// Bütünlük kapısı (`kopuk`, video.go) yalnız kare ORTASINDAKİ deliği
+// görüyordu; karenin BAŞI yeni damgayla geldiği için "yeni kare" sanılıyor,
+// kaybolan baş fark edilmiyordu. Tarayıcı kopyası (Chrome'un kendi
+// depaketleyicisi) aynı akışta bu kareyi yazmamıştı.
+var errH264BassizParca = errors.New("h264: FU-A başlangıç parçası yok — karenin başı kayıp")
+
 func (h *h264Ayiklayici) Adi() string { return "H264" }
 
 func (h *h264Ayiklayici) Ayikla(p vpaket) ([]byte, bool, bool, error) {
@@ -56,6 +67,10 @@ func (h *h264Ayiklayici) Ayikla(p vpaket) ([]byte, bool, bool, error) {
 	if basla {
 		h.pkt = codecs.H264Packet{}
 		h.sonRTP, h.sonVar = p.rtp, true
+		// FU-A (28) ve S biti (0x80) yok → bkz. errH264BassizParca.
+		if len(p.payload) >= 2 && p.payload[0]&0x1f == 28 && p.payload[1]&0x80 == 0 {
+			return nil, basla, false, errH264BassizParca
+		}
 	}
 	veri, err := h.pkt.Unmarshal(p.payload)
 	if err != nil {

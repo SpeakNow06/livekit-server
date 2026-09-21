@@ -1383,6 +1383,29 @@ geçemezdi). Sahte SR kaynağı artık yazıcıya İTİYOR (`ilet`, RTCP okuyucu
   `TestSesSRAdimFirefox`; `TestSes911A` bölüm sayısı ≤ 8. Öz denetim `sr_adim`.
 İmaj `v1.11.0-rawrec52`, iki sunucuda.
 
+## 41. rawrec53 — kayıptan sonra anahtar kare bekle; başı kopuk H.264 karesi (2026-09-21, kayıt 929)
+Samsung tablet paylaşımının SFU dosyasında paket kaybından kalan 6 kare Chrome'un
+çözücüsünü KALICI öldürüyordu (`PIPELINE_ERROR_DECODE`, macOS VideoToolbox -12909);
+oynatıcı o bölgeye atlayınca sonsuza kadar "yükleniyor" gösteriyordu. Ölçüldü:
+başı kopuk 1 kare (FU-A başlangıç parçası kayıp → pion çöp başlıklı NAL üretiyor,
+`first_mb=4, pps_id=3`) + kaybolan bir anahtar kareye dayanan 3 fark karesi; yalnız
+ilkini çıkarmak yetmedi, altısı çıkınca dosya sorunsuz oynadı. Tarayıcı kopyası
+(Chrome'un kendi depaketleyicisi) bu kareleri zaten yazmamıştı.
+- `h264.go`: kare başında FU-A ama S biti yok → `errH264BassizParca` (kare atılır).
+- `video.go` `işle` + `kayipDurumu`: bozuk/yarım/başsız kare atılınca yayıncıdan PLI
+  (`force=false`, 500 ms kısıt) ve anahtar kare gelene kadar HİÇBİR fark karesi
+  yazılmaz (her WebRTC alıcısının kuralı); kodekten bağımsız. Log: "kayıptan sonra
+  anahtar kare geldi" (beklerken atılan, süre). Sağlık: `kare_anahtar_bekle_atilan`.
+- Testler: `TestH264ParcaKaybiKareAtilir` (orta parça) ve yeni `TestH264BasKaybiKareAtilir`
+  (ilk parça) → bozuk kare + anahtar kareye kadarki fark kareleri atılır, PLI sayısı
+  temiz geçişten fazla, ffprobe hatasız; `gercekH264` tek dilim + `qp=0` (çok parçalı
+  fark karesi olsun). VP9 altın değerleri KASITLI değişti: 115 → 97 kare
+  (k=40 sonrası 41..50, k=90 sonrası 91..98 de atılıyor), sha `5b1adf99…`; iki
+  katman 86 → 76; yakalama-saati testi damgayı 48 yerine 52. kareye taşıdı.
+- Postprocess tarafı (speaknow-server/monopol `h264_temizle.py`): eski dosyalar ve
+  tarayıcı yolu için aynı kural TS düzeyinde (zehirli kare + kayıp IDR'ye kadar).
+İmaj `v1.11.0-rawrec53`, iki sunucuda.
+
 ## Rebuild
 ```bash
 cd livekit-server-source            # bu repo, branch speaknow-vp9-simulcast

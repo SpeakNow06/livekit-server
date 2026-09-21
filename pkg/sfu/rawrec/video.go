@@ -429,6 +429,8 @@ func (w *VideoWriter) loop() {
 		parçaBozuk   bool  // toplanan karenin ortasında eksik paket var
 		parçaYak     int64 // toplanan karenin yakalanma anı (abs-capture-time), 0 = yok
 		başladı      bool  // ilk anahtar kare görüldü mü
+		// KAYIPTAN SONRA ANAHTAR KARE BEKLEME (rawrec53) — bkz. kayipDurumu.
+		kayip kayipDurumu
 
 		// SIRA TAMPONU (2026-09-04, kayıt 185). Paketler kare toplayıcıya
 		// GELİŞ sırasıyla değil, SIRA NUMARASI düzeniyle giriyor. Gerekçe
@@ -856,6 +858,10 @@ func (w *VideoWriter) loop() {
 	// boşalt — sıra tamponunda hazır olan paketleri SIRA NUMARASI düzeninde
 	// kare toplayıcıya ver. `hepsi` true iken bekleme süresi gözetilmiyor
 	// (akış sonu / hedef bulunduğunda biriken tamponun boşaltılması).
+	// pliIste — kayıptan sonra anahtar kare isteği (rawrec53, bkz. kayipDurumu).
+	// `force=false`: LiveKit'in 500 ms PLI kısıtı devrede, sel olmuyor.
+	pliIste := func() { w.kaynak(suAnkiKatman).SendPLI(false) }
+
 	boşalt := func(an time.Time, hepsi bool) {
 		for {
 			p, kopuk, ok := sira.al(an, hepsi)
@@ -863,7 +869,7 @@ func (w *VideoWriter) loop() {
 				return
 			}
 			w.işle(p, kopuk, &parça, &topluyor, &parçaRTP, &parçaAnahtar,
-				&parçaBozuk, &parçaYak, sagl, kareYaz)
+				&parçaBozuk, &parçaYak, sagl, &kayip, pliIste, kareYaz)
 			if vazgeç {
 				return
 			}
@@ -1571,6 +1577,32 @@ const videoBekleyenÜstSınır = 10000
 // sıra numarası uzayları da ayrı, tek sıra tamponu ikisini birden
 // düzenleyemezdi).
 
+// kayipDurumu — KAYIPTAN SONRA ANAHTAR KARE BEKLEME (rawrec53, kayıt 929).
+//
+// Bozuk bir kare atıldıktan sonra yayıncı yeni bir anahtar kare gönderene
+// kadar HİÇBİR fark karesi yazılmıyor ve yayıncıdan PLI isteniyor — her
+// WebRTC alıcısının (Chrome dahil) yaptığı şey. Gerekçe: atılan karenin
+// ardındaki fark kareleri ona (ya da kaybolan bir anahtar kareye) dayanıyor;
+// dosyada dayanağı olmayan bir bölüm başlıyor ve Chrome'un donanım çözücüsü
+// (macOS VideoToolbox, -12909 "bad data") bunu görünce öğeyi KALICI
+// kapatıyor: oynatıcı sonsuza kadar "yükleniyor" gösteriyordu.
+//
+// ÖLÇÜLDÜ (kayıt 929, Samsung tablet paylaşımı): 4,4-10,5 sn arasındaki
+// 6 kare — başı kopuk 1 (errH264BassizParca) + kaybolan bir anahtar kareye
+// dayanan 3 + aradaki 2 — dosyada kaldığı sürece paylaşımın o bölümüne hiç
+// atlanamıyordu; altısı çıkarılınca dosya sorunsuz oynadı. Yalnız başı kopuk
+// kareyi çıkarmak YETMEDİ (ardındaki kareler de öldürüyordu). Kural bu yüzden
+// "bozuk kareyi at" değil, "bozuk kareden sonra anahtar kareye kadar at".
+// Bedel: kayıp başına PLI + anahtar kareye kadar birkaç kare (PLI'yla
+// genelde <0,5 sn). Kodekten bağımsız: VP9/VP8/AV1 fark kareleri de
+// dayanaksız kalıyor. Postprocess'te de aynı kural var (h264_temizle.py,
+// eski dosyalar ve tarayıcı yolu için).
+type kayipDurumu struct {
+	bekliyor bool      // bozuk kare atıldı, anahtar kare bekleniyor
+	atilan   int       // beklerken atılan fark karesi
+	basi     time.Time // beklemenin başladığı an
+}
+
 // işle — bir RTP paketini kare toplayıcıya ver; kare tamamlanınca yaz.
 //
 // Kodek, paketten kare parçasını ve sınır bayraklarını veriyor (`Ayikla`:
@@ -1578,6 +1610,7 @@ const videoBekleyenÜstSınır = 10000
 // `bitir`e kadar olan paketlerin parçalarının ardışık birleşimi.
 func (w *VideoWriter) işle(p vpaket, kopuk bool, parça *[]byte, topluyor *bool,
 	parçaRTP *uint32, parçaAnahtar *bool, parçaBozuk *bool, parçaYak *int64, sagl *saglik,
+	kayip *kayipDurumu, pliIste func(),
 	kareYaz func([]byte, uint32, bool, time.Time, int64)) {
 
 	// atla — yarım kareyi bırak. `bozuk` true ise kare eksik parçayla
@@ -1590,6 +1623,17 @@ func (w *VideoWriter) işle(p vpaket, kopuk bool, parça *[]byte, topluyor *bool
 		*parçaBozuk = false
 		*parça = (*parça)[:0]
 	}
+	// kayipBasla — bozuk kare atıldı: anahtar kare gelene kadar fark karesi
+	// yazma, yayıncıdan anahtar kare iste (bkz. kayipDurumu).
+	kayipBasla := func(an time.Time) {
+		if kayip.bekliyor {
+			return
+		}
+		kayip.bekliyor, kayip.atilan, kayip.basi = true, 0, an
+		if pliIste != nil {
+			pliIste()
+		}
+	}
 
 	veri, basla, bitir, err := w.kodek.Ayikla(p)
 	if err != nil {
@@ -1597,7 +1641,13 @@ func (w *VideoWriter) işle(p vpaket, kopuk bool, parça *[]byte, topluyor *bool
 		// iptal et. Bir sonraki kare başlangıcında temiz başlarız.
 		// (Boş verinin hata olup olmadığına kodek karar veriyor: VP9'da
 		// hata, H.264'te FU-A biriktirme.)
+		// Karenin BAŞI kayıpsa (errH264BassizParca) toplayıcı henüz bu
+		// kareye açılmadı; yine de bir kare gitti, sayaca yaz.
+		if basla {
+			sagl.kareAtildi()
+		}
 		atla(true)
+		kayipBasla(p.geliş)
 		return
 	}
 
@@ -1605,6 +1655,7 @@ func (w *VideoWriter) işle(p vpaket, kopuk bool, parça *[]byte, topluyor *bool
 	// kaybolmuş ya da paket düşmüş) — yarım kareyi at, yenisine geç.
 	if *topluyor && p.rtp != *parçaRTP {
 		atla(true)
+		kayipBasla(p.geliş)
 	}
 
 	if basla {
@@ -1624,7 +1675,14 @@ func (w *VideoWriter) işle(p vpaket, kopuk bool, parça *[]byte, topluyor *bool
 		*parçaBozuk = true
 	}
 	if !*topluyor {
-		return // kare ortasından geldik, kare başlangıcı bekliyoruz
+		// Kare ortasından geldik, kare başlangıcı bekliyoruz. Paketten hemen
+		// önce boşluk varsa (kopuk) bu karenin BAŞI kaybolmuş demektir: kare
+		// yazılmayacak ve sonrakiler ona dayanıyor → kayıp (rawrec53).
+		if kopuk {
+			sagl.kareAtildi()
+			kayipBasla(p.geliş)
+		}
+		return
 	}
 	*parça = append(*parça, veri...)
 	if p.anahtar {
@@ -1636,7 +1694,23 @@ func (w *VideoWriter) işle(p vpaket, kopuk bool, parça *[]byte, topluyor *bool
 	if bitir {
 		if *parçaBozuk {
 			atla(true)
+			kayipBasla(p.geliş)
 			return
+		}
+		// KAYIPTAN SONRA ANAHTAR KARE BEKLEME (rawrec53): fark karesi
+		// dayanaksız, yazılmıyor; anahtar kare gelince bekleme biter.
+		if kayip.bekliyor {
+			if !*parçaAnahtar {
+				kayip.atilan++
+				sagl.kareBeklerkenAtildi()
+				atla(false)
+				return
+			}
+			w.log.Infow("rawrec görüntü: kayıptan sonra anahtar kare geldi",
+				"track", w.trackID, "sid", w.sid,
+				"beklerken_atilan_kare", kayip.atilan,
+				"bekleme", p.geliş.Sub(kayip.basi).Round(time.Millisecond))
+			kayip.bekliyor = false
 		}
 		kareYaz(*parça, *parçaRTP, *parçaAnahtar, p.geliş, *parçaYak)
 		atla(false)

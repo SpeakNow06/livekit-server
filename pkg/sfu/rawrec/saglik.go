@@ -145,6 +145,9 @@ type saglik struct {
 	atilanKare  uint64
 	siraBosluk  uint64 // sıra tamponunda hiç kapanmayan boşluk
 	gecPaket    uint64 // pencere kapandıktan sonra gelip atılan paket
+	// bekleAtilanKare — bozuk kare atıldıktan sonra anahtar kare gelene kadar
+	// YAZILMAYAN fark karesi (rawrec53; bkz. video.go kayipDurumu).
+	bekleAtilanKare uint64
 }
 
 func yeniSaglik() *saglik { return &saglik{baslangic: simdi()} }
@@ -234,6 +237,15 @@ func (s *saglik) kareAtildi() {
 	s.atilanKare++
 }
 
+// kareBeklerkenAtildi — kayıptan sonra anahtar kare beklenirken atılan
+// fark karesi (bütünlüğü bozuk DEĞİL, dayanağı kayıp — rawrec53).
+func (s *saglik) kareBeklerkenAtildi() {
+	if s == nil {
+		return
+	}
+	s.bekleAtilanKare++
+}
+
 // siraDurumu — sıra tamponunun sayaçları (dosya kapanırken bir kez).
 func (s *saglik) siraDurumu(bosluk, gec uint64) {
 	if s == nil {
@@ -310,6 +322,9 @@ func (s *saglik) rapor() map[string]any {
 		if yazilan > 0 {
 			r["kare_atilan_hiz"] = yuvarla(float64(s.atilanKare) / yazilan)
 		}
+	}
+	if s.bekleAtilanKare > 0 {
+		r["kare_anahtar_bekle_atilan"] = s.bekleAtilanKare
 	}
 	if s.kayitOncesiAtilan > 0 {
 		r["kayit_oncesi_atilan_sn"] = yuvarla(s.kayitOncesiAtilan.Seconds())
