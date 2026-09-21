@@ -52,6 +52,10 @@ type vpaket struct {
 	geliş   time.Time
 	seq     uint16 // RTP sıra numarası (kayıp ölçümü — bkz. saglik.go)
 	katman  int32  // hangi simulcast katmanından geldi
+	// yakalamaNs — abs-capture-time (yayıncının yakalama saati, unix ns);
+	// 0 = yok. Katman geçişinde bölüm tabanı bununla KESİN kuruluyor
+	// (bütün katmanlar aynı yakalama saatini taşır — Adım 6).
+	yakalamaNs int64
 }
 
 // VideoWriter — bir video track'inin ÜST katmanı için ham IVF yazıcısı.
@@ -218,7 +222,7 @@ func üstKatmanBoyutu(ti *livekit.TrackInfo) (uint16, uint16) {
 // medya yolundan, forwardRTP goroutine'inden çağrılıyor ve orada yapılacak
 // her iş canlı derse gecikme olarak yansır.
 func (w *VideoWriter) Write(payload []byte, rtpTS uint32, marker, anahtarKare bool,
-	seq uint16, katman int32) {
+	seq uint16, katman int32, yakalamaNs int64) {
 	if w == nil || w.closed.Load() || len(payload) == 0 {
 		return
 	}
@@ -255,7 +259,8 @@ func (w *VideoWriter) Write(payload []byte, rtpTS uint32, marker, anahtarKare bo
 	copy(cp, payload)
 	select {
 	case w.ch <- vpaket{payload: cp, rtp: rtpTS, marker: marker,
-		anahtar: anahtarKare, geliş: an, seq: seq, katman: katman}:
+		anahtar: anahtarKare, geliş: an, seq: seq, katman: katman,
+		yakalamaNs: yakalamaNs}:
 	default:
 		if n := w.düşen.Add(1); n == 1 || n%1000 == 0 {
 			// Görüntüde düşen paket = BOZUK KARE. Seste bir paket kaybı 20 ms
@@ -421,7 +426,8 @@ func (w *VideoWriter) loop() {
 		topluyor     bool
 		parçaRTP     uint32
 		parçaAnahtar bool
-		parçaBozuk   bool // toplanan karenin ortasında eksik paket var
+		parçaBozuk   bool  // toplanan karenin ortasında eksik paket var
+		parçaYak     int64 // toplanan karenin yakalanma anı (abs-capture-time), 0 = yok
 		başladı      bool // ilk anahtar kare görüldü mü
 
 		// SIRA TAMPONU (2026-09-04, kayıt 185). Paketler kare toplayıcıya
@@ -490,6 +496,10 @@ func (w *VideoWriter) loop() {
 		// (bkz. `bölümBekler` bloğu, kayıt 194).
 		sonYazRTP    uint32
 		sonYazKatman int32 = -1
+		// YAKALAMA SAATİ (Adım 6): son yazılan karenin yakalanma anı ve
+		// sayaçlar (yan JSON `act_kare` / `act_oran`).
+		sonYazYak int64
+		actKare   int
 
 		// REFERANS KATMAN — bütün katmanlar bunun damga uzayına çevriliyor
 		// (bkz. `katmanKaymasi`). İlk yazılan katman referans oluyor.
@@ -537,7 +547,14 @@ func (w *VideoWriter) loop() {
 				// katmandan geliyor — fit yalnız o katmanın SR'larını
 				// kullanmalı (katmanların RTP tabanı ayrı).
 				capaKatman: referansKatman,
-				ek:         katilimciEk(h),
+				ek: func() map[string]any {
+					ek := katilimciEk(h)
+					ek["act_kare"] = actKare
+					if kare > 0 {
+						ek["act_oran"] = yuvarla(float64(actKare) / float64(kare))
+					}
+					return ek
+				}(),
 			})
 			yol = ""
 		}
@@ -630,7 +647,7 @@ func (w *VideoWriter) loop() {
 
 	// kareYaz — toplanmış kareyi dosyaya yaz. Dosya henüz açılmadıysa ve kare
 	// anahtar kare ise dosyayı burada açar.
-	kareYaz := func(veri []byte, rtpTS uint32, anahtarKare bool, geliş time.Time) {
+	kareYaz := func(veri []byte, rtpTS uint32, anahtarKare bool, geliş time.Time, yakNs int64) {
 		if len(veri) == 0 {
 			return
 		}
@@ -712,11 +729,21 @@ func (w *VideoWriter) loop() {
 		if bölümBekler {
 			ara := int64(-1)
 			araKaynak := "referans"
+			// ── 0. YOL: YAKALAMA SAATİ (abs-capture-time, Adım 6) ────────
+			// Bütün katmanlar aynı kameranın aynı yakalama saatini taşıyor;
+			// iki karenin yakalanma anları arasındaki fark, katman ve SR
+			// bağımsız KESİN boşluk. Varsa hiçbir tahmine gerek yok.
+			if sonYazYak > 0 && yakNs > 0 {
+				araKaynak = "yakalama"
+				if d := yakNs - sonYazYak; d > 0 && d < int64(bölümAraÜstSınır) {
+					ara = d * int64(w.clockRate) / int64(time.Second)
+				}
+			}
 			// ── 1. YOL: REFERANS KATMAN UZAYI (tercih edilen) ──────────
 			// İki damgayı da referansın uzayına taşıyıp farkı alıyoruz.
 			// Kaymalar SABİT olduğu için aşağı/yukarı geçişlerin hataları
 			// birebir götürüyor (gerekçe: `katmanKaymasi`).
-			if sonYazKatman >= 0 && referansKatman >= 0 {
+			if ara < 0 && sonYazKatman >= 0 && referansKatman >= 0 {
 				ke, oke := kayma(sonYazKatman)
 				ky, oky := kayma(suAnkiKatman)
 				if oke && oky {
@@ -795,6 +822,10 @@ func (w *VideoWriter) loop() {
 		sonPTS = pts
 		sonGeliş = geliş
 		sonYazRTP, sonYazKatman = rtpTS, suAnkiKatman
+		if yakNs > 0 {
+			sonYazYak = yakNs
+			actKare++
+		}
 		if kareGunluguAcik {
 			kareGunluk = append(kareGunluk, kareOrnek{
 				K: suAnkiKatman, R: rtpTS, P: pts})
@@ -818,7 +849,7 @@ func (w *VideoWriter) loop() {
 				return
 			}
 			w.işle(p, kopuk, &parça, &topluyor, &parçaRTP, &parçaAnahtar,
-				&parçaBozuk, sagl, kareYaz)
+				&parçaBozuk, &parçaYak, sagl, kareYaz)
 			if vazgeç {
 				return
 			}
@@ -1532,8 +1563,8 @@ const videoBekleyenÜstSınır = 10000
 // VP9'da B/E bitleri, H.264'te damga değişimi + marker). Kare = `basla`dan
 // `bitir`e kadar olan paketlerin parçalarının ardışık birleşimi.
 func (w *VideoWriter) işle(p vpaket, kopuk bool, parça *[]byte, topluyor *bool,
-	parçaRTP *uint32, parçaAnahtar *bool, parçaBozuk *bool, sagl *saglik,
-	kareYaz func([]byte, uint32, bool, time.Time)) {
+	parçaRTP *uint32, parçaAnahtar *bool, parçaBozuk *bool, parçaYak *int64, sagl *saglik,
+	kareYaz func([]byte, uint32, bool, time.Time, int64)) {
 
 	// atla — yarım kareyi bırak. `bozuk` true ise kare eksik parçayla
 	// kapanmak üzereydi, sayaca yazılıyor (sağlık raporuna giriyor).
@@ -1568,6 +1599,7 @@ func (w *VideoWriter) işle(p vpaket, kopuk bool, parça *[]byte, topluyor *bool
 		*parça = (*parça)[:0]
 		*parçaRTP = p.rtp
 		*parçaAnahtar = p.anahtar
+		*parçaYak = p.yakalamaNs // karenin yakalanma anı = ilk parçasınınki
 	} else if kopuk && *topluyor {
 		// ⚠ BÜTÜNLÜK KAPISI (2026-09-04, kayıt 185). Bu paketten hemen önce
 		// bir paket eksik → karenin ortasında delik var. Eskiden yazılıyordu
@@ -1592,7 +1624,7 @@ func (w *VideoWriter) işle(p vpaket, kopuk bool, parça *[]byte, topluyor *bool
 			atla(true)
 			return
 		}
-		kareYaz(*parça, *parçaRTP, *parçaAnahtar, p.geliş)
+		kareYaz(*parça, *parçaRTP, *parçaAnahtar, p.geliş, *parçaYak)
 		atla(false)
 	}
 }

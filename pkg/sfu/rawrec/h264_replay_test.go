@@ -191,7 +191,7 @@ func TestH264GercekAkisTS(t *testing.T) {
 
 	w := yeniH264Yazici(t, dir)
 	for _, p := range paketler {
-		w.Write(p.payload, p.rtp, p.marker, p.anahtar, p.seq, p.katman)
+		w.Write(p.payload, p.rtp, p.marker, p.anahtar, p.seq, p.katman, 0)
 	}
 	yol := dosyaBekle(t, filepath.Join(dir, "camraw_1", "*.ts"))
 	w.Close()
@@ -246,7 +246,7 @@ func TestH264ParcaKaybiKareAtilir(t *testing.T) {
 		if i == hedef {
 			continue
 		}
-		w.Write(p.payload, p.rtp, p.marker, p.anahtar, p.seq, p.katman)
+		w.Write(p.payload, p.rtp, p.marker, p.anahtar, p.seq, p.katman, 0)
 	}
 	yol := dosyaBekle(t, filepath.Join(dir, "camraw_1", "*.ts"))
 	w.Close()

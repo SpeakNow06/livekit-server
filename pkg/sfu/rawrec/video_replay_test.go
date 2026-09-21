@@ -228,7 +228,7 @@ func TestReplayTekKatmanBirebir(t *testing.T) {
 	dir := t.TempDir()
 	w, _ := yeniTestYazici(t, dir, 0)
 	for _, p := range replayDizisi(0) {
-		w.Write(p.payload, p.rtp, p.marker, p.anahtar, p.seq, p.katman)
+		w.Write(p.payload, p.rtp, p.marker, p.anahtar, p.seq, p.katman, 0)
 	}
 	yol := dosyaBekle(t, filepath.Join(dir, "share_1", "*.ivf"))
 	w.Close()
@@ -282,7 +282,7 @@ func TestReplayIkiKatmanSayim(t *testing.T) {
 		if p.kare >= 60 {
 			break
 		}
-		w.Write(p.payload, p.rtp, p.marker, p.anahtar, p.seq, p.katman)
+		w.Write(p.payload, p.rtp, p.marker, p.anahtar, p.seq, p.katman, 0)
 	}
 	dosyaBekle(t, filepath.Join(dir, "share_1", "*.ivf"))
 	// Üst katman: bambaşka damga tabanı ve sıra uzayı, anahtar kareyle başlıyor.
@@ -293,7 +293,7 @@ func TestReplayIkiKatmanSayim(t *testing.T) {
 		n := 3
 		anahtar := k == 0 || k == 24
 		for i := 0; i < n; i++ {
-			w.Write(vp9Yuk(i == 0, i == n-1, anahtar, k, i), rtp, i == n-1, anahtar, seq, 1)
+			w.Write(vp9Yuk(i == 0, i == n-1, anahtar, k, i), rtp, i == n-1, anahtar, seq, 1, 0)
 			seq++
 		}
 		ustKare++
@@ -326,5 +326,59 @@ func TestReplayIkiKatmanSayim(t *testing.T) {
 	// eksikti → postprocess kamerayı ilk mikrofona eşliyordu).
 	if !bytes.Contains(j, []byte(`"participant":"test-kisi"`)) {
 		t.Fatalf("görüntü yan JSON'unda participant yok")
+	}
+}
+
+// TestVideoYakalamaSaatiKatmanGecisi — abs-capture-time varken katman
+// geçişindeki bölüm tabanı YAKALAMA saatinden: iki katmanın RTP tabanı
+// bambaşka, SR yok; alt katmanın son karesi ile üst katmanın ilk anahtar
+// karesi arasında 2 sn yakalama farkı var → dosyadaki PTS farkı tam 2 sn.
+func TestVideoYakalamaSaatiKatmanGecisi(t *testing.T) {
+	dir := t.TempDir()
+	w, _ := yeniTestYazici(t, dir, 1)
+	ust := &sahteKaynak{} // SR YOK: referans/çekim yolları çalışamaz
+	w.KatmanKaydet(1, ust)
+	yak0 := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC).UnixNano()
+	kareYak := func(k int) int64 { return yak0 + int64(k)*33_366_667 } // ~30 fps
+
+	// alt katman: ilk 60 kare, her kare kendi yakalama anıyla
+	for _, p := range replayDizisi(0) {
+		if p.kare >= 60 {
+			break
+		}
+		w.Write(p.payload, p.rtp, p.marker, p.anahtar, p.seq, p.katman, kareYak(p.kare))
+	}
+	dosyaBekle(t, filepath.Join(dir, "share_1", "*.ivf"))
+	// üst katman: bambaşka damga tabanı; ilk anahtar karesi alt katmanın
+	// 59. karesinden 2 sn SONRA yakalanmış (kodlayıcı ısınması gibi).
+	seq := uint16(5000)
+	rtp := uint32(500000)
+	for k := 0; k < 30; k++ {
+		n := 3
+		anahtar := k == 0 || k == 24
+		yak := kareYak(59) + 2*int64(time.Second) + int64(k)*33_366_667
+		for i := 0; i < n; i++ {
+			w.Write(vp9Yuk(i == 0, i == n-1, anahtar, k, i), rtp, i == n-1, anahtar, seq, 1, yak)
+			seq++
+		}
+		rtp += 3000
+	}
+	w.Close()
+
+	yol := dosyaBekle(t, filepath.Join(dir, "share_1", "*.ivf"))
+	_, kareler, _ := ivfOku(t, yol)
+	// alt: 60 − 3 (anahtar öncesi) − 1 (k=40 eksik) = 56; üst: 30
+	if len(kareler) != 86 {
+		t.Fatalf("kare sayısı %d, beklenen 86", len(kareler))
+	}
+	// 56. kare (indeks 55) alt katmanın 59. karesi, 57. kare (indeks 56)
+	// üst katmanın ilk karesi: PTS farkı 2 sn = 180000 tık (90 kHz), ±1 ms.
+	fark := int64(kareler[56][0]) - int64(kareler[55][0])
+	if d := fark - 180000; d > 90 || d < -90 {
+		t.Fatalf("katman geçişindeki PTS farkı %d tık (%.3f sn), beklenen 180000 (2,000 sn)", fark, float64(fark)/90000)
+	}
+	j, _ := os.ReadFile(yol[:len(yol)-4] + ".json")
+	if !bytes.Contains(j, []byte(`"act_kare":86`)) {
+		t.Fatalf("yan JSON'da act_kare 86 yok: %s", j[:min(300, len(j))])
 	}
 }

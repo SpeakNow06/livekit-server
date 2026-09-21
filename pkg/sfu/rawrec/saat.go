@@ -106,7 +106,23 @@ type sesSaat struct {
 	srBozuk   int       // toleransı aşan SR sayısı
 	srAtlanan int       // hiçbir bölümün penceresine düşmeyen SR (susturma içi)
 	bayat     int       // bayat ilk paket düzeltmesi sayısı
+
+	// ── YAKALAMA SAATİ (abs-capture-time, Adım 6) ────────────────────────
+	// Paketin başlığındaki yakalanma anı yayıncının kendi saati: ağ titremesi
+	// yok, SR beklemek yok, sinyal gerekmez. Varsa "0. YOL": Δyakalama −
+	// Δrtp > 100 ms → durmuş saat, taban kesin. Chrome dolduruyor; Safari ve
+	// Firefox libwebrtc'ye yakalama zamanı vermiyor (uzantı pazarlansa da
+	// pakete girmez) → orada varış/SR yolu sürer. Mobil (react-native)
+	// zaten durmuyor.
+	sonYak      int64  // son (yedek olmayan) paketin yakalanma anı, 0 = yok
+	sonYakRTP   uint32 // o paketin RTP'si
+	actPaket    int    // yakalama saatli paket sayısı
+	paketSayisi int    // yedek dışı toplam paket
 }
+
+// actEsik — yakalama saatiyle ölçülen eksik bunu aşarsa bölüm açılır.
+// Yakalama saatinde titreme yok; 5 paketlik pay, ölçüm gürültüsüne karşı.
+const actEsik = 100 * time.Millisecond
 
 func yeniSesSaat(hz uint32) *sesSaat {
 	return &sesSaat{hz: int64(hz)}
@@ -134,19 +150,24 @@ func (s *sesSaat) muteSinyali() { s.muteBekliyor = true }
 
 // yerlestir — paketin dosya içindeki yerini (pts) verir; yeni bölüm
 // açıldıysa onu döner. `yedek` (RED yedek bloğu) durumu değiştirmez.
-func (s *sesSaat) yerlestir(rtp uint32, gelis time.Time, seq uint16, yedek bool) (int64, *sesBolum) {
+func (s *sesSaat) yerlestir(rtp uint32, gelis time.Time, seq uint16, yedek bool, yakNs int64) (int64, *sesBolum) {
 	if !s.var_ {
 		b := &sesBolum{Sira: 0, RTP0: rtp, Pts0: 0, Kaynak: "ilk", IlkGelisNs: gelis.UnixNano()}
 		s.bolumler = append(s.bolumler, b)
 		s.var_ = true
 		s.sonRTP, s.sonGelis, s.sonSeq, s.sonPts = rtp, gelis, seq, 0
 		b.sonRTP, b.sonPts, b.Paket, b.sonGelisNs = rtp, 0, 1, gelis.UnixNano()
+		s.paketSayisi = 1
+		if yakNs > 0 {
+			s.actPaket, s.sonYak, s.sonYakRTP = 1, yakNs, rtp
+		}
 		return 0, nil
 	}
 	b := s.simdiki()
 	if yedek {
 		return b.Pts0 + sdelta(rtp, b.RTP0), nil
 	}
+	s.paketSayisi++
 	dRtp := sdelta(rtp, s.sonRTP)
 	dGelis := gelis.Sub(s.sonGelis)
 	eksik := dGelis - time.Duration(dRtp*int64(time.Second)/s.hz)
@@ -156,6 +177,39 @@ func (s *sesSaat) yerlestir(rtp uint32, gelis time.Time, seq uint16, yedek bool)
 	}
 	var yeni *sesBolum
 	pts := b.Pts0 + sdelta(rtp, b.RTP0)
+	if yakNs > 0 {
+		s.actPaket++
+	}
+	if yakNs > 0 && s.sonYak > 0 {
+		// ── 0. YOL: YAKALAMA SAATİ ── yayıncının kendi saatiyle ölçülen
+		// eksik; kesin, titremesiz. Bölüm hemen "kesin" (SR düzeltmesi
+		// gerekmez), varış tahmini karşılaştırma için kaydedilir.
+		dYak := time.Duration(yakNs - s.sonYak)
+		eksikYak := dYak - time.Duration(sdelta(rtp, s.sonYakRTP)*int64(time.Second)/s.hz)
+		switch {
+		case eksikYak > actEsik:
+			pts = s.sonPts + s.sureOrnek(dYak)
+			e := eksikYak.Seconds()
+			yeni = &sesBolum{Sira: len(s.bolumler), RTP0: rtp, Pts0: pts, Kaynak: "act",
+				VarisEksikSn: eksik.Seconds(), SrEksikSn: &e, Kesin: true,
+				MuteSinyali: s.muteBekliyor, IlkGelisNs: gelis.UnixNano()}
+			s.bolumler = append(s.bolumler, yeni)
+			s.muteBekliyor = false
+			b = yeni
+		case eksikYak < -actEsik && !b.Kesin && b.Paket <= 3 && b.Sira > 0:
+			// Bayat ilk paket (bkz. aşağıdaki varış kuralı) — yakalama
+			// saatiyle kesin.
+			duz := s.sonPts + s.sureOrnek(dYak)
+			b.Pts0 += duz - pts
+			pts = duz
+			s.bayat++
+		}
+		s.sonYak, s.sonYakRTP = yakNs, rtp
+		return s.bitir(b, rtp, gelis, seq, pts, dRtp, yeni)
+	}
+	if yakNs > 0 {
+		s.sonYak, s.sonYakRTP = yakNs, rtp
+	}
 	switch {
 	case eksik > esik:
 		// DURMUŞ SAAT: duvar, RTP'den eşikten fazla ilerledi. Paketi bir
@@ -179,6 +233,12 @@ func (s *sesSaat) yerlestir(rtp uint32, gelis time.Time, seq uint16, yedek bool)
 		pts = duz
 		s.bayat++
 	}
+	return s.bitir(b, rtp, gelis, seq, pts, dRtp, yeni)
+}
+
+// bitir — paketin durumunu işle (ortak kuyruk).
+func (s *sesSaat) bitir(b *sesBolum, rtp uint32, gelis time.Time, seq uint16,
+	pts, dRtp int64, yeni *sesBolum) (int64, *sesBolum) {
 	if pts <= s.sonPts && dRtp > 0 {
 		// Aynı bölümde geri gitmez; eş damga/kopya paketleri yazıcı ayıklıyor.
 		pts = s.sonPts + 1
@@ -302,6 +362,10 @@ func (s *sesSaat) ozDenetim() map[string]any {
 		"sr_bozuk":    s.srBozuk,
 		"sr_atlanan":  s.srAtlanan,
 		"bayat_paket": s.bayat,
+		"act_paket":   s.actPaket,
+	}
+	if s.paketSayisi > 0 {
+		r["act_oran"] = yuvarla(float64(s.actPaket) / float64(s.paketSayisi))
 	}
 	kesin := 0
 	for _, b := range s.bolumler {

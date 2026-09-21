@@ -172,7 +172,8 @@ type spaket struct {
 	seq   uint16
 	gelis time.Time
 	yuk   []byte
-	mute  bool // bu paketten ÖNCE yayıncı mute sinyali (PubMute) verilsin
+	mute  bool  // bu paketten ÖNCE yayıncı mute sinyali (PubMute) verilsin
+	yak   int64 // abs-capture-time (yayıncının yakalama saati, unix ns), 0 = yok
 }
 
 // sesYaz — paketi yazıcıya verir ve döngünün onu İŞLEMESİNİ bekler
@@ -182,7 +183,7 @@ func sesYaz(w *Writer, k *sahteSesKaynak, p spaket, hedefIslenen uint64) {
 		w.PubMute(true)
 	}
 	k.now.Store(p.gelis.UnixNano())
-	w.Write(p.yuk, p.rtp, 960, p.seq, p.gelis.UnixNano())
+	w.Write(p.yuk, p.rtp, 960, p.seq, p.gelis.UnixNano(), p.yak)
 	for n := 0; w.islenen.Load() < hedefIslenen; n++ {
 		if n < 1000 {
 			runtime.Gosched()
@@ -250,6 +251,10 @@ type yayinci struct {
 	// dogru — üretilen her paketin GERÇEK konumu (örnek, duvar saatine göre)
 	dogru []int64
 	wall0 int64
+	// act — paketlere yakalama saati (abs-capture-time) yazılsın: yakalama =
+	// duvar − 40 ms (sabit yakalama→sunucu gecikmesi); yayıncı saati sunucudan
+	// 3 saat geride (ofsetin önemi olmadığını gösterir).
+	act bool
 }
 
 func yeniYayinci(t0 time.Time, rtp0 uint32) *yayinci {
@@ -260,6 +265,9 @@ func (y *yayinci) paket() spaket {
 	p := spaket{rtp: y.rtp, seq: y.seq, gelis: time.Unix(0, y.wallNs), yuk: opusYuk(y.n)}
 	if y.jitter != nil {
 		p.gelis = p.gelis.Add(y.jitter(y.n))
+	}
+	if y.act {
+		p.yak = y.wallNs - 40*int64(time.Millisecond) - 3*int64(time.Hour)
 	}
 	y.dogru = append(y.dogru, (y.wallNs-y.wall0)*48000/int64(time.Second))
 	y.n++
@@ -927,5 +935,91 @@ func TestSesREDYedek(t *testing.T) {
 		if pk[i].granul <= pk[i-1].granul {
 			t.Fatalf("granül artan değil: paket %d", i)
 		}
+	}
+}
+
+// ── YAKALAMA SAATİ (abs-capture-time, Adım 6) ───────────────────────────────
+
+// TestSesYakalamaSaatiKisaDurma — 0,5 sn SİNYALSİZ durma: varış kuralı (2 sn
+// eşiği) görmezdi; yakalama saati 100 ms eşiğiyle görür, taban KESİN
+// (SR'a gerek yok), kaynak "act".
+func TestSesYakalamaSaatiKisaDurma(t *testing.T) {
+	k := &sahteSesKaynak{}
+	y := yeniYayinci(t0(), 500_000)
+	y.act = true
+	y.jitter = func(i int) time.Duration { return time.Duration((i*7919)%23-11) * time.Millisecond }
+	d := dizi(k, y, 600, 50, func(i int, y *yayinci) bool {
+		if i == 300 {
+			y.dur(500)
+		}
+		return false
+	})
+	pk, yan := sesKos(t, k, d)
+	enB, at := enBuyukSapma(t, pk, y.dogru)
+	oz := ozDenetim(t, yan)
+	bl := bolumler(t, yan)
+	t.Logf("yakalama 0,5 sn: sapma %.4f (paket %d) oz=%v", enB, at, oz)
+	if enB > 0.0005 {
+		t.Fatalf("yakalama saatiyle sapma %.4f sn (≈0 olmalı)", enB)
+	}
+	if len(bl) != 2 || bl[1]["kaynak"] != "act" || bl[1]["kesin"] != true {
+		t.Fatalf("bölümler: %v", bl)
+	}
+	if e := bl[1]["sr_eksik_sn"].(float64); math.Abs(e-0.5) > 0.001 {
+		t.Fatalf("act eksik %.4f, beklenen 0,500", e)
+	}
+	if oz["act_oran"].(float64) != 1 || oz["durum"] != "tutarli" {
+		t.Fatalf("öz denetim: %v", oz)
+	}
+}
+
+// TestSesYakalamaSaatiDTXKayipPatlama — DTX, kayıp ve 2,5 sn kuyruk
+// patlaması: yakalama saati hepsini "boşluk değil" diye görür; hiç bölüm
+// açılmaz (varış kuralı patlamada yanlış alarm verirdi).
+func TestSesYakalamaSaatiDTXKayipPatlama(t *testing.T) {
+	k := &sahteSesKaynak{}
+	y := yeniYayinci(t0(), 500_000)
+	y.act = true
+	y.jitter = func(i int) time.Duration {
+		if i >= 400 && i < 460 {
+			return 2500 * time.Millisecond
+		}
+		return 0
+	}
+	d := dizi(k, y, 700, 50, func(i int, y *yayinci) bool {
+		switch i {
+		case 100:
+			y.dtx(5000)
+		case 200:
+			y.kayip(150)
+		}
+		return false
+	})
+	pk, yan := sesKos(t, k, d)
+	enB, at := enBuyukSapma(t, pk, y.dogru)
+	oz := ozDenetim(t, yan)
+	if enB > 0.0005 || oz["bolum"].(float64) != 1 {
+		t.Fatalf("yakalama saatiyle bölüm açılmamalıydı: sapma %.4f (paket %d) oz=%v", enB, at, oz)
+	}
+}
+
+// TestSesYakalamaSaatiMuteUzun — mute sinyali + 20 sn durma, yakalama saati
+// var: bölüm "act" ve kesin; SR kesinleştirmesi gerekmez, gelse de dokunmaz.
+func TestSesYakalamaSaatiMuteUzun(t *testing.T) {
+	k := &sahteSesKaynak{}
+	y := yeniYayinci(t0(), 500_000)
+	y.act = true
+	d := dizi(k, y, 600, 50, func(i int, y *yayinci) bool {
+		if i == 300 {
+			y.dur(20000)
+			return true
+		}
+		return false
+	})
+	pk, yan := sesKos(t, k, d)
+	enB, _ := enBuyukSapma(t, pk, y.dogru)
+	bl := bolumler(t, yan)
+	if enB > 0.0005 || len(bl) != 2 || bl[1]["kaynak"] != "act" || bl[1]["mute_sinyali"] != true {
+		t.Fatalf("sapma %.4f bölümler %v", enB, bl)
 	}
 }

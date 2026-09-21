@@ -73,6 +73,25 @@ func AbsCaptureTimeFromValue(absoluteCaptureTimestamp uint64, estimatedCaptureCl
 	}
 }
 
+// CaptureTime — paketin ilk örneğinin yakalanma anı (yayıncının NTP saati,
+// unix zaman). Geçersizse sıfır zaman. (SPEAKNOW FORK — rawrec yazıcıları
+// bölüm tabanını bununla kuruyor, bkz. pkg/sfu/rawrec/saat.go.)
+func (a *AbsCaptureTime) CaptureTime() time.Time {
+	if a == nil || a.absoluteCaptureTimestamp == 0 {
+		return time.Time{}
+	}
+	return a.absoluteCaptureTimestamp.Time()
+}
+
+// EstimatedCaptureClockOffset — yayıncının bildirdiği yakalama saati ofseti
+// (Q32.32 imzalı); 0 ise bildirilmemiş.
+func (a *AbsCaptureTime) EstimatedCaptureClockOffset() int64 {
+	if a == nil {
+		return 0
+	}
+	return a.estimatedCaptureClockOffset
+}
+
 func (a *AbsCaptureTime) Rewrite(offset time.Duration) error {
 	if a.absoluteCaptureTimestamp == 0 {
 		return errInvalidData

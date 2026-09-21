@@ -120,7 +120,7 @@ func TestVP8GercekAkisIVF(t *testing.T) {
 	}
 	w := yeniKodekYazici(t, dir, mime.MimeTypeVP8, "TR_VP8")
 	for _, p := range paketler {
-		w.Write(p.payload, p.rtp, p.marker, p.anahtar, p.seq, p.katman)
+		w.Write(p.payload, p.rtp, p.marker, p.anahtar, p.seq, p.katman, 0)
 	}
 	yol := dosyaBekle(t, filepath.Join(dir, "camraw_1", "*.ivf"))
 	w.Close()
@@ -168,7 +168,7 @@ func TestAV1GercekAkisIVF(t *testing.T) {
 	}
 	w := yeniKodekYazici(t, dir, mime.MimeTypeAV1, "TR_AV1")
 	for _, p := range paketler {
-		w.Write(p.payload, p.rtp, p.marker, p.anahtar, p.seq, p.katman)
+		w.Write(p.payload, p.rtp, p.marker, p.anahtar, p.seq, p.katman, 0)
 	}
 	yol := dosyaBekle(t, filepath.Join(dir, "camraw_1", "*.ivf"))
 	w.Close()

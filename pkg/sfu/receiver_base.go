@@ -972,6 +972,20 @@ func (r *ReceiverBase) startForwarderForBufferLocked(layer int32, buff buffer.Bu
 // 1079 karede 7 kez). Tek katmana sabitlemek o sınıf bozulmayı kaldırıyor.
 //
 // SVC'de (tek uptrack, spatial paketin içinde) katman hep 0.
+// rawrecYakalamaNs — abs-capture-time başlık uzantısından paketin yakalanma
+// anı (unix ns), uzantı yoksa 0. Ses ve görüntü yazıcıları bölüm tabanını
+// bununla KESİN kuruyor (rawrec/saat.go "0. YOL", video.go "0. YOL").
+func rawrecYakalamaNs(extPkt *buffer.ExtPacket) int64 {
+	if extPkt == nil || extPkt.AbsCaptureTimeExt == nil {
+		return 0
+	}
+	t := extPkt.AbsCaptureTimeExt.CaptureTime()
+	if t.IsZero() {
+		return 0
+	}
+	return t.UnixNano()
+}
+
 func (r *ReceiverBase) rawrecÜstKatman() int32 {
 	if r.videoLayerMode == livekit.VideoLayer_MULTIPLE_SPATIAL_LAYERS_PER_STREAM {
 		return 0
@@ -1115,8 +1129,9 @@ func (r *ReceiverBase) forwardRTP(
 		if rawWriter != nil {
 			// Varış = tampona giriş anı (Arrival), SFU kuyruğunun gecikmesi
 			// eşleyicinin "durmuş saat" ölçüsüne karışmasın (rawrec/saat.go).
+			// Yakalama saati (abs-capture-time) varsa eşleyici onu kullanır.
 			rawWriter.Write(extPkt.Packet.Payload, extPkt.Packet.Timestamp, 960,
-				extPkt.Packet.SequenceNumber, extPkt.Arrival)
+				extPkt.Packet.SequenceNumber, extPkt.Arrival, rawrecYakalamaNs(extPkt))
 		}
 
 		if extPkt.Packet.PayloadType != uint8(r.params.Codec.PayloadType) {
@@ -1136,7 +1151,7 @@ func (r *ReceiverBase) forwardRTP(
 		if rawVideo != nil {
 			rawVideo.Write(extPkt.Packet.Payload, extPkt.Packet.Timestamp,
 				extPkt.Packet.Marker, extPkt.IsKeyFrame,
-				extPkt.Packet.SequenceNumber, layer)
+				extPkt.Packet.SequenceNumber, layer, rawrecYakalamaNs(extPkt))
 		}
 
 		spatialLayer := layer

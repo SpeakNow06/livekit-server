@@ -301,6 +301,11 @@ type paket struct {
 	geliş   time.Time
 	yedek   bool   // RED yedek bloğu mu (delik doldurmak için, yoksa atılır)
 	seq     uint16 // RTP sıra numarası (kayıp ölçümü; yedekte anlamsız)
+	// yakalamaNs — paketin ilk örneğinin YAKALANMA anı (abs-capture-time
+	// RTP başlık uzantısı, yayıncının saati, unix ns); 0 = uzantı yok.
+	// Varsa eşleyici bölüm kararını ağ titremesiz, sinyalsiz ve kesin verir
+	// (saat.go "0. YOL").
+	yakalamaNs int64
 }
 
 // Writer — bir ses track'i için ham Ogg/Opus yazıcısı.
@@ -410,7 +415,9 @@ func kaynakAdı(ti *livekit.TrackInfo) string {
 // `gelişNs`: paketin tampona VARIŞ anı (`extPkt.Arrival`, unix ns). Eşleyici
 // (saat.go) durmuş saati bununla ölçüyor; SFU kuyruğunun gecikmesi hesaba
 // karışmasın diye `time.Now()` değil. 0 verilirse şimdi.
-func (w *Writer) Write(payload []byte, rtpTS uint32, örnek uint32, seq uint16, gelişNs int64) {
+//
+// `yakalamaNs`: abs-capture-time uzantısından yakalanma anı (unix ns), yoksa 0.
+func (w *Writer) Write(payload []byte, rtpTS uint32, örnek uint32, seq uint16, gelişNs, yakalamaNs int64) {
 	if w == nil || w.closed.Load() || len(payload) == 0 {
 		return
 	}
@@ -430,16 +437,18 @@ func (w *Writer) Write(payload []byte, rtpTS uint32, örnek uint32, seq uint16, 
 			return
 		}
 		for _, b := range bloklar {
-			w.kuyruğaKoy(b.veri, rtpTS-b.ofset, örnek, an, b.ofset != 0, seq)
+			// Yedek bloğun yakalanma anı taşıyıcının değil: 0 (eşleyici
+			// yedekler için durum güncellemiyor zaten).
+			w.kuyruğaKoy(b.veri, rtpTS-b.ofset, örnek, an, b.ofset != 0, seq, 0)
 		}
 		return
 	}
-	w.kuyruğaKoy(payload, rtpTS, örnek, an, false, seq)
+	w.kuyruğaKoy(payload, rtpTS, örnek, an, false, seq, yakalamaNs)
 }
 
 // kuyruğaKoy — tek bir ses karesini sıraya koyar. ASLA BLOKLAMAZ.
 func (w *Writer) kuyruğaKoy(payload []byte, rtpTS, örnek uint32,
-	an time.Time, yedek bool, seq uint16) {
+	an time.Time, yedek bool, seq uint16, yakalamaNs int64) {
 	if len(payload) == 0 {
 		return
 	}
@@ -448,7 +457,7 @@ func (w *Writer) kuyruğaKoy(payload []byte, rtpTS, örnek uint32,
 	copy(cp, payload)
 	select {
 	case w.ch <- paket{payload: cp, rtp: rtpTS, örnek: örnek, geliş: an,
-		yedek: yedek, seq: seq}:
+		yedek: yedek, seq: seq, yakalamaNs: yakalamaNs}:
 	default:
 		if n := w.düşen.Add(1); n == 1 || n%1000 == 0 {
 			w.log.Warnw("rawrec sırası dolu, paket düşürüldü", nil, "toplam", n)
@@ -569,7 +578,7 @@ func (w *Writer) loop() {
 			gorulenMute = n
 			saat.muteSinyali()
 		}
-		pts, yeni := saat.yerlestir(p.rtp, p.geliş, p.seq, p.yedek)
+		pts, yeni := saat.yerlestir(p.rtp, p.geliş, p.seq, p.yedek, p.yakalamaNs)
 		if p.yedek {
 			// Kopya mı delik mi: atanmış en büyük pts'nin gerisindeyse ya da
 			// eşitse zaten var (kuyrukta ya da dosyada) → at.

@@ -1244,6 +1244,24 @@ bayat ilk paket, RED yedeği, dosya adı çakışması. Video altınları deği�
 **Bilinen sınır:** sinyalsiz < 2 sn durma düzeltilmez (LiveKit ile aynı); karne açığı gösterir.
 İmaj `v1.11.0-rawrec41`.
 
+## 32. rawrec43: YAKALAMA SAATİ (abs-capture-time) — ses ve görüntü (2026-09-21, Adım 6)
+
+Sunucu yayıncı ses+görüntüde `abs-capture-time` uzantısını zaten kabul ediyordu
+(`pkg/rtc/config.go`), `buffer_base.go` `ExtPacket.AbsCaptureTimeExt`e çözüyordu; rawrec kullanmıyordu.
+- `abscapturetime.go`: `CaptureTime()` / `EstimatedCaptureClockOffset()` erişimcileri.
+- `receiver_base.go`: `rawrecYakalamaNs(extPkt)` → ses ve görüntü `Write`'ına `yakalamaNs`.
+- `saat.go` "0. YOL": Δyakalama − Δrtp > 100 ms → bölüm, taban `sonPts + Δyakalama` (KESİN, SR gerekmez,
+  sinyal gerekmez, ağ titremesi yok); bayat ilk paket de yakalama saatiyle. `oz_denetim.act_paket/act_oran`.
+- `video.go` "0. YOL": katman geçişinde `ara = yakalama(yeni) − yakalama(son yazılan)` (bütün katmanlar aynı
+  yakalama saatini taşır); yan JSON `act_kare/act_oran`; `görüntü yan JSON'una participant` (rawrec42'de eklendi).
+- Kim doldurur (SES-SAATI-TARAYICI-ARASTIRMA.md): Chrome masaüstü/Android EVET; Safari ve Firefox libwebrtc'ye
+  yakalama zamanı vermiyor → uzantı pazarlansa da pakete girmez (varış/SR yolu sürer); react-native zaten durmuyor.
+- İstemci: `static/js/abs-capture-time-hook.js` (speaknow-server + monopol, classroom.html) —
+  `setHeaderExtensionsToNegotiate` (Chrome 113+) ya da SDP extmap ekleme (Firefox hariç).
+- Testler: `TestSesYakalamaSaatiKisaDurma` (0,5 sn sinyalsiz → 0 sapma, kaynak act), `…DTXKayipPatlama`
+  (2,5 sn kuyruk patlamasında bile bölüm yok), `…MuteUzun`, `TestVideoYakalamaSaatiKatmanGecisi` (SR'sız
+  katman geçişi 2,000 sn); eski altınlar değişmedi (yakalama 0 → eski yol).
+
 ## Rebuild
 ```bash
 cd livekit-server-source            # bu repo, branch speaknow-vp9-simulcast
