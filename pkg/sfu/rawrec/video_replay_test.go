@@ -57,7 +57,7 @@ func paketiEtkinlestir(t *testing.T, dir string) {
 	kfEnÇokKare, kfEnAzSn, kfEnÇokSn = 24, 2*time.Second, 30*time.Second
 	eski := hedefAra
 	hedefAra = func(sid string, log logger.Logger) *hedef {
-		return &hedef{RecordingID: 1, Dir: dir}
+		return &hedef{RecordingID: 1, Dir: dir, Identity: "test-kisi"}
 	}
 	t.Cleanup(func() { hedefAra = eski })
 }
@@ -321,5 +321,10 @@ func TestReplayIkiKatmanSayim(t *testing.T) {
 	}
 	if !bytes.Contains(j, []byte(`"sid":"TR_TEST"`)) || !bytes.Contains(j, []byte(`"cid":"cid-test"`)) {
 		t.Fatalf("yan JSON'da sid/cid yok: %s", j[:min(200, len(j))])
+	}
+	// Katılımcı kimliği GÖRÜNTÜ yan dosyasında da olmalı (kayıt 913'te
+	// eksikti → postprocess kamerayı ilk mikrofona eşliyordu).
+	if !bytes.Contains(j, []byte(`"participant":"test-kisi"`)) {
+		t.Fatalf("görüntü yan JSON'unda participant yok")
 	}
 }

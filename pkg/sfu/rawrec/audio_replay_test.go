@@ -535,6 +535,9 @@ func TestSes911T(t *testing.T) {
 	if oz["bolum"].(float64) != 1 || oz["durum"] != "tutarli" {
 		t.Fatalf("911T bölüm/durum: %v", oz)
 	}
+	if yan["participant"] != "test-kisi" {
+		t.Fatalf("ses yan JSON'unda participant yok/yanlış: %v", yan["participant"])
+	}
 }
 
 // ── 3. SENTETİK SENARYOLAR ──────────────────────────────────────────────────

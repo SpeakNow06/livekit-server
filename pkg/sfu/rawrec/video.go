@@ -537,6 +537,7 @@ func (w *VideoWriter) loop() {
 				// katmandan geliyor — fit yalnız o katmanın SR'larını
 				// kullanmalı (katmanların RTP tabanı ayrı).
 				capaKatman: referansKatman,
+				ek:         katilimciEk(h),
 			})
 			yol = ""
 		}

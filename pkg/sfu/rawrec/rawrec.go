@@ -202,11 +202,12 @@ func initOnce() {
 	// YAZMA GECİKMESİ (Adım 2, saat.go): ses paketleri diske bu kadar
 	// geriden yazılır ki susturma sonrası bölümün tabanı ilk Sender Report
 	// ile kesinleştikten SONRA yazılsın. Kayıt canlı değil, bedeli yok:
-	// 10 sn × 50 paket × ~90 B ≈ 45 KB. 10 sn neden: 911 fikstüründe
-	// unmute sonrası ilk SR 2-8 sn arasında geldi (Chrome ~5 sn'de bir
-	// yolluyor ama susturma içindekiler atılıyor); 6 sn üç bölümün
-	// üçünü de kaçırıyordu, 10 sn hepsini yakalıyor.
-	yazmaGecikme = time.Duration(envInt("SN_RAWREC_YAZMA_GECIKME", 10)) * time.Second
+	// 20 sn × 50 paket × ~90 B ≈ 90 KB. 20 sn neden: 911'de unmute sonrası
+	// ilk geçerli SR 2,2 / 7,0 / 8,4 / 13,9 sn sonra geldi (Chrome ~5 sn'de
+	// bir yolluyor, susturma içindekiler atılıyor, iki aralık geçebiliyor);
+	// 10 sn birini kaçırıyordu. Geç kalırsa da kayıt bozulmaz: kesin değer
+	// yan JSON'a düşer, postprocess uygular (`_bolum_kaydirmalari`).
+	yazmaGecikme = time.Duration(envInt("SN_RAWREC_YAZMA_GECIKME", 20)) * time.Second
 	pinHigh = envOr("SN_RAWREC_PIN_HIGH", "1") != "0"
 	kfEnÇokKare = envInt("SN_RAWREC_KEYFRAME_MAX_KARE", 24)
 	kfEnAzSn = time.Duration(envInt("SN_RAWREC_KEYFRAME_MIN_SN", 2)) * time.Second
@@ -959,14 +960,10 @@ func dosyaAcExcl(d string, ad func(n int) string, n int) (*os.File, string, erro
 func (w *Writer) yanJSON(yol string, ilkAn time.Time, kare int, ilkRTP, sonRel uint32,
 	sr *livekit.RTCPSenderReportState, sagl *saglik, redKurtarilan uint64,
 	saat *sesSaat, h *hedef) {
-	ek := map[string]any{
-		"bolumler":         saat.bolumler,
-		"oz_denetim":       saat.ozDenetim(),
-		"yazma_gecikme_sn": yazmaGecikme.Seconds(),
-	}
-	if h != nil && h.Identity != "" {
-		ek["participant"] = h.Identity
-	}
+	ek := katilimciEk(h)
+	ek["bolumler"] = saat.bolumler
+	ek["oz_denetim"] = saat.ozDenetim()
+	ek["yazma_gecikme_sn"] = yazmaGecikme.Seconds()
 	yanJSONYaz(yanParam{
 		yol: yol, sid: w.sid, ilkAn: ilkAn, kare: kare, ilkRTP: ilkRTP, sonRel: sonRel,
 		clockRate: w.clockRate, sr: sr, buff: w.buff, log: w.log,
@@ -976,6 +973,18 @@ func (w *Writer) yanJSON(yol string, ilkAn time.Time, kare int, ilkRTP, sonRel u
 		kaynak: kaynakTuru(w.trackInfo),
 		ptsUzayi: true, anchorNs: saat.anchorNs, ek: ek,
 	})
+}
+
+// katilimciEk — yan JSON'a `participant` (webhook `identity`). Ses VE
+// görüntü yazıcısı: postprocess kamera ↔ mikrofon eşlemesini bununla yapıyor
+// (kayıt 913'te görüntü yan dosyasında eksikti, kamera ilk mikrofona
+// eşlenirdi).
+func katilimciEk(h *hedef) map[string]any {
+	ek := map[string]any{}
+	if h != nil && h.Identity != "" {
+		ek["participant"] = h.Identity
+	}
+	return ek
 }
 
 // srOrnek — akış boyunca görülen bir Sender Report'un (RTP, duvar saati)
