@@ -341,22 +341,32 @@ func TestVideoYakalamaSaatiKatmanGecisi(t *testing.T) {
 	yak0 := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC).UnixNano()
 	kareYak := func(k int) int64 { return yak0 + int64(k)*33_366_667 } // ~30 fps
 
-	// alt katman: ilk 60 kare, her kare kendi yakalama anıyla
+	// alt katman: ilk 60 kare; uzantı SEYREK (Chrome saniyede bir yazıyor —
+	// kayıt 914: 459 karede 20): yalnız her 24. kare taşısın, 59. kare
+	// TAŞIMASIN → eski tarafın anı 48. kareden RTP ile enterpole edilmeli.
 	for _, p := range replayDizisi(0) {
 		if p.kare >= 60 {
 			break
 		}
-		w.Write(p.payload, p.rtp, p.marker, p.anahtar, p.seq, p.katman, kareYak(p.kare))
+		yak := int64(0)
+		if p.kare%24 == 0 {
+			yak = kareYak(p.kare)
+		}
+		w.Write(p.payload, p.rtp, p.marker, p.anahtar, p.seq, p.katman, yak)
 	}
 	dosyaBekle(t, filepath.Join(dir, "share_1", "*.ivf"))
 	// üst katman: bambaşka damga tabanı; ilk anahtar karesi alt katmanın
 	// 59. karesinden 2 sn SONRA yakalanmış (kodlayıcı ısınması gibi).
+	// Uzantı yine seyrek: yalnız 0. ve 24. kareler (anahtar kareler) taşıyor.
 	seq := uint16(5000)
 	rtp := uint32(500000)
 	for k := 0; k < 30; k++ {
 		n := 3
 		anahtar := k == 0 || k == 24
-		yak := kareYak(59) + 2*int64(time.Second) + int64(k)*33_366_667
+		yak := int64(0)
+		if anahtar {
+			yak = kareYak(59) + 2*int64(time.Second) + int64(k)*33_366_667
+		}
 		for i := 0; i < n; i++ {
 			w.Write(vp9Yuk(i == 0, i == n-1, anahtar, k, i), rtp, i == n-1, anahtar, seq, 1, yak)
 			seq++
@@ -377,8 +387,9 @@ func TestVideoYakalamaSaatiKatmanGecisi(t *testing.T) {
 	if d := fark - 180000; d > 90 || d < -90 {
 		t.Fatalf("katman geçişindeki PTS farkı %d tık (%.3f sn), beklenen 180000 (2,000 sn)", fark, float64(fark)/90000)
 	}
+	// alt katmanda 0,24,48 (0 anahtar öncesi atıldı → 24, 48) + üst 0, 24 = 4
 	j, _ := os.ReadFile(yol[:len(yol)-4] + ".json")
-	if !bytes.Contains(j, []byte(`"act_kare":86`)) {
-		t.Fatalf("yan JSON'da act_kare 86 yok: %s", j[:min(300, len(j))])
+	if !bytes.Contains(j, []byte(`"act_kare":4`)) {
+		t.Fatalf("yan JSON'da act_kare 4 yok: %s", j[:min(300, len(j))])
 	}
 }

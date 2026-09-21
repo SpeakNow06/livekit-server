@@ -496,10 +496,16 @@ func (w *VideoWriter) loop() {
 		// (bkz. `bölümBekler` bloğu, kayıt 194).
 		sonYazRTP    uint32
 		sonYazKatman int32 = -1
-		// YAKALAMA SAATİ (Adım 6): son yazılan karenin yakalanma anı ve
-		// sayaçlar (yan JSON `act_kare` / `act_oran`).
-		sonYazYak int64
-		actKare   int
+		// YAKALAMA SAATİ (Adım 6). Chrome uzantıyı HER karede değil, saniyede
+		// bir yazıyor (libwebrtc AbsoluteCaptureTimeSender: alıcı aradakileri
+		// RTP ile enterpole etsin) — kayıt 914'te 459 karenin 20'si. O yüzden
+		// "yakalama saati taşıyan son kare" (act) ile "son yazılan kare"
+		// ayrı tutuluyor; son yazılan karenin yakalanma anı aynı katmanın RTP
+		// farkıyla enterpole ediliyor (`sonActYak + Δrtp/hz`).
+		sonActYak    int64  // yakalama saati taşıyan son yazılan karenin anı
+		sonActRTP    uint32 // o karenin RTP'si
+		sonActKatman int32 = -1
+		actKare      int
 
 		// REFERANS KATMAN — bütün katmanlar bunun damga uzayına çevriliyor
 		// (bkz. `katmanKaymasi`). İlk yazılan katman referans oluyor.
@@ -733,9 +739,12 @@ func (w *VideoWriter) loop() {
 			// Bütün katmanlar aynı kameranın aynı yakalama saatini taşıyor;
 			// iki karenin yakalanma anları arasındaki fark, katman ve SR
 			// bağımsız KESİN boşluk. Varsa hiçbir tahmine gerek yok.
-			if sonYazYak > 0 && yakNs > 0 {
+			// Yeni kare uzantıyı taşımalı; eski tarafın anı, aynı katmandaki
+			// son act karesinden RTP farkıyla enterpole (uzantı seyrek).
+			if sonActYak > 0 && yakNs > 0 && sonActKatman == sonYazKatman {
 				araKaynak = "yakalama"
-				if d := yakNs - sonYazYak; d > 0 && d < int64(bölümAraÜstSınır) {
+				eskiYak := sonActYak + sdelta(sonYazRTP, sonActRTP)*int64(time.Second)/int64(w.clockRate)
+				if d := yakNs - eskiYak; d > 0 && d < int64(bölümAraÜstSınır) {
 					ara = d * int64(w.clockRate) / int64(time.Second)
 				}
 			}
@@ -823,7 +832,7 @@ func (w *VideoWriter) loop() {
 		sonGeliş = geliş
 		sonYazRTP, sonYazKatman = rtpTS, suAnkiKatman
 		if yakNs > 0 {
-			sonYazYak = yakNs
+			sonActYak, sonActRTP, sonActKatman = yakNs, rtpTS, suAnkiKatman
 			actKare++
 		}
 		if kareGunluguAcik {

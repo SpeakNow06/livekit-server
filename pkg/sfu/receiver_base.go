@@ -1071,6 +1071,15 @@ func (r *ReceiverBase) forwardRTP(
 			r.params.TrackID, r.trackInfo, r.params.Codec.ClockRate,
 			r.isRED, buff, r.params.Logger)
 		if rawWriter != nil {
+			// TANI (2026-09-21, kayıt 914): teklif ses için abs-capture-time'ı
+			// pazarladı (id 5), görüntü paketleri taşıdı, ses paketleri HİÇ
+			// taşımadı. Alıcının pazarlanmış uzantı listesi burada görünsün.
+			uzantilar := make([]string, 0, len(r.params.HeaderExtensions))
+			for _, he := range r.params.HeaderExtensions {
+				uzantilar = append(uzantilar, fmt.Sprintf("%d=%s", he.ID, he.URI))
+			}
+			r.params.Logger.Infow("rawrec ses: alıcı başlık uzantıları",
+				"uzantilar", uzantilar, "red", r.isRED)
 			r.rawAudio.Store(rawWriter)
 			defer func() {
 				r.rawAudio.CompareAndSwap(rawWriter, nil)
