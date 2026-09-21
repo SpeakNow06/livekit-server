@@ -11,7 +11,7 @@
 // görüntüsünde gecikme yayılımı 148 ms ile 4501 ms arasında oynadı, 4501 ms'lik
 // kayıtta paylaşımın sesi görüntüden ~500 ms kaydı.
 //
-// Burada o sorun YOK: Sender Report aynı süreçte (`buff.GetSenderReportData()`),
+// Burada o sorun YOK: Sender Report aynı süreçte (ham SR kancası, `Writer.SR`),
 // yani çapa hesap değil VERİ. Üstelik `ExtPacket` NACK onarımlı ve sıralı
 // geliyor, damga da 32 bit sarmadan arınmış.
 //
@@ -306,6 +306,9 @@ type paket struct {
 	// Varsa eşleyici bölüm kararını ağ titremesiz, sinyalsiz ve kesin verir
 	// (saat.go "0. YOL").
 	yakalamaNs int64
+	// sr — Sender Report öğesi (rawrec45): payload boş, yalnız bu dolu.
+	// Kanala paketlerle aynı sıradan girer, döngü eşleyiciye verir.
+	sr *livekit.RTCPSenderReportState
 }
 
 // Writer — bir ses track'i için ham Ogg/Opus yazıcısı.
@@ -334,6 +337,9 @@ type Writer struct {
 	// muteSayac — yayıncı mute sinyali kaç kez geldi (PubMute). Döngü
 	// değişimi görünce eşleyiciye "mute bekliyor" der (saat.go: eşik 0,2 sn).
 	muteSayac atomic.Int64
+	// kapatKilit — `SR` başka goroutine'den (RTCP okuyucu) geliyor; kanal
+	// kapanırken gönderim olmasın diye Close yazma, SR okuma kilidi alır.
+	kapatKilit sync.RWMutex
 }
 
 // PubMute — yayıncı track'i susturdu/açtı (ReceiverBase.UpdateTrackInfo →
@@ -344,6 +350,32 @@ func (w *Writer) PubMute(muted bool) {
 		return
 	}
 	w.muteSayac.Add(1)
+}
+
+// SR — HAM Sender Report (rawrec45). LiveKit'in istatistik katmanından
+// (rtpstats) DEĞİL, telden geldiği gibi: o katman susturma sırasında
+// Chrome'un RTP'si tahmini SR'larını kabul edip açılıştan sonraki gerçek
+// SR'ları "sırasız" diye atıyordu (kayıt 915: 157 sn susturma → 6 SR düştü,
+// bölüm hiç kesinleşmedi). Eleme burada: eşleyici SR'ı VARIŞ anına göre
+// bir bölümün penceresine oturtuyor, susturma içindekiler açıkta kalıyor
+// (saat.go bolumZamanla). Kanala paketlerle aynı sıradan girer; RTCP
+// okuyucu goroutine'inden çağrılır, ASLA BLOKLAMAZ.
+func (w *Writer) SR(sr *livekit.RTCPSenderReportState) {
+	if w == nil || sr == nil || sr.NtpTimestamp == 0 {
+		return
+	}
+	w.kapatKilit.RLock()
+	defer w.kapatKilit.RUnlock()
+	if w.closed.Load() {
+		return
+	}
+	select {
+	case w.ch <- paket{sr: sr}:
+	default:
+		if n := w.düşen.Add(1); n == 1 || n%1000 == 0 {
+			w.log.Warnw("rawrec sırası dolu, SR düşürüldü", nil, "toplam", n)
+		}
+	}
 }
 
 // srKaynak — yalnız ihtiyacımız olan kısım. Arayüzü dar tutuyoruz ki test
@@ -472,7 +504,9 @@ func (w *Writer) Close() {
 	if w == nil || !w.closed.CompareAndSwap(false, true) {
 		return
 	}
+	w.kapatKilit.Lock()
 	close(w.ch)
+	w.kapatKilit.Unlock()
 	<-w.done
 }
 
@@ -506,14 +540,15 @@ func (w *Writer) loop() {
 		iz              tamponIzi
 		pencereUyarildi bool // `waitFor` doldu: yoklama seyreltildi, Redis'e "hedef-yok" düştü
 
-		// ── SR'yi AKIŞ SÜRERKEN topla (2026-08-31) ────────────────────────
+		// ── SR AKIŞLA GELİYOR ─────────────────────────────────────────────
 		// İlk sürüm `GetSenderReportData()`yı dosya KAPANIRKEN okuyordu ve
-		// 74,8 DAKİKA BAYAT veri alıyordu (kayıt 172): kapanış anında
-		// `forwardRTP` çoktan dönmüş, tampon havuza geri verilmiş oluyor ve
-		// içindeki SR başka bir oturuma ait. Artık her N pakette bir
-		// örnekleyip SONUNCUSUNU saklıyoruz.
-		sonSR   *livekit.RTCPSenderReportState
-		srSayaç int
+		// 74,8 DAKİKA BAYAT veri alıyordu (kayıt 172); sonra her 10 pakette
+		// bir yokluyordu. rawrec45'ten beri SR'lar HAM olarak kanaldan
+		// geliyor (`Writer.SR`), paketlerle aynı sırada — yoklama yok, LiveKit
+		// süzgeci yok (kayıt 915 gerekçesi `SR` başlığında). Dosya açılmadan
+		// gelenler bekletilir, açılışta eşleyiciye verilir.
+		sonSR      *livekit.RTCPSenderReportState
+		bekleyenSR []*livekit.RTCPSenderReportState
 		// SR günlüğü artık EŞLEYİCİDE (`saat.gunluk`, pts'li).
 
 		// SAĞLIK: yazıcının kendi durumu (bkz. saglik.go). Postprocess
@@ -683,6 +718,25 @@ func (w *Writer) loop() {
 			if !ok {
 				return // kanal kapandı → defer kapat() dosyayı bitirir
 			}
+			if p.sr != nil {
+				// HAM SR öğesi (rawrec45). `islenen`e SAYILMAZ: o sayaç
+				// paketleri izliyor (testlerin beslemesi ona bakıyor).
+				if vazgeç {
+					continue
+				}
+				sonSR = p.sr
+				if fh == nil {
+					// Dosya (ve eşleyici) yok: beklet, açılışta ver. Kayan
+					// tampon en çok `waitFor` tutuyor; SR ~5 sn'de bir → 16 yeter.
+					bekleyenSR = append(bekleyenSR, p.sr)
+					if len(bekleyenSR) > 16 {
+						bekleyenSR = bekleyenSR[1:]
+					}
+				} else {
+					srIsle(p.sr)
+				}
+				continue
+			}
 			w.islenen.Add(1)
 			if vazgeç {
 				continue
@@ -758,10 +812,15 @@ func (w *Writer) loop() {
 					kuyrugaAl(b)
 				}
 				bekleyen = nil
-				if sr := w.buff.GetSenderReportData(); sr != nil && sr.NtpTimestamp != 0 {
-					sonSR = sr
-					srIsle(sr)
+				// Dosya açılmadan gelen ham SR'lar: dosyadaki ilk paketten
+				// öncekiler hiçbir bölüme düşmez (boşuna "atlanan" sayılır),
+				// kalanlar eşleyiciye — ilk bölümün çapası burada kurulur.
+				for _, sr := range bekleyenSR {
+					if sr.At >= ilkAn.UnixNano() {
+						srIsle(sr)
+					}
 				}
+				bekleyenSR = nil
 				bosalt(false)
 				continue
 			}
@@ -771,18 +830,7 @@ func (w *Writer) loop() {
 			// susturmada duran RTP saati dosyadan süre siliyordu (kayıt 911).
 			// Artık yer eşleyiciden (saat.go), yazım kuyruktan (yazPaket).
 			kuyrugaAl(p)
-
-			// SR'yi AKIŞ SÜRERKEN topla (kayıt 172: kapanışta okunan SR
-			// 74,8 dk bayattı). 10 pakette bir: SR ~5 sn'de bir güncelleniyor,
-			// sık bakmak yeni örnek üretmiyor ama güncellemeyi GECİKMEDEN
-			// yakalıyor — bölüm tabanının kesinleşmesi buna bağlı.
-			srSayaç++
-			if srSayaç%10 == 0 {
-				if sr := w.buff.GetSenderReportData(); sr != nil && sr.NtpTimestamp != 0 {
-					sonSR = sr
-					srIsle(sr)
-				}
-			}
+			// SR artık kanaldan, paketlerle aynı sırada (yukarıda `p.sr`).
 			bosalt(false)
 		}
 	}
@@ -979,7 +1027,7 @@ func (w *Writer) yanJSON(yol string, ilkAn time.Time, kare int, ilkRTP, sonRel u
 		trackID: w.trackID, düşen: w.düşen.Load(), etiket: "ses",
 		srGunluk: saat.gunluk, capaKatman: 0,
 		errBayrak: &w.errLogged, sagl: sagl, redKurt: redKurtarilan,
-		kaynak: kaynakTuru(w.trackInfo),
+		kaynak:   kaynakTuru(w.trackInfo),
 		ptsUzayi: true, anchorNs: saat.anchorNs, ek: ek,
 	})
 }

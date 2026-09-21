@@ -110,6 +110,10 @@ type BufferProvider interface {
 	GetSenderReportData() *livekit.RTCPSenderReportState
 
 	OnRtcpSenderReport(fn func())
+	// OnRtcpSenderReportHam — SPEAKNOW FORK (rawrec45): her Sender Report'u
+	// istatistik katmanının süzgecinden ÖNCE, olduğu gibi verir (bkz.
+	// SetSenderReportData). Ham kayıt (rawrec) kullanıyor.
+	OnRtcpSenderReportHam(fn func(*livekit.RTCPSenderReportState))
 	OnFpsChanged(fn func())
 	OnVideoSizeChanged(fn func([]VideoSize))
 	OnCodecChange(fn func(webrtc.RTPCodecParameters))
@@ -191,10 +195,12 @@ type BufferBase struct {
 
 	// callbacks
 	onRtcpSenderReport func()
-	onFpsChanged       func()
-	onVideoSizeChanged func([]VideoSize)
-	onCodecChange      func(webrtc.RTPCodecParameters)
-	onStreamRestart    func(string)
+	// onRtcpSenderReportHam — SPEAKNOW FORK (rawrec45): süzgeçsiz SR alıcısı.
+	onRtcpSenderReportHam func(*livekit.RTCPSenderReportState)
+	onFpsChanged          func()
+	onVideoSizeChanged    func([]VideoSize)
+	onCodecChange         func(webrtc.RTPCodecParameters)
+	onStreamRestart       func(string)
 
 	// video size tracking for multiple spatial layers
 	currentVideoSize [DefaultMaxLayerSpatial + 1]VideoSize
@@ -1307,6 +1313,24 @@ func (b *BufferBase) doFpsCalc(ep *ExtPacket) {
 }
 
 func (b *BufferBase) SetSenderReportData(srData *livekit.RTCPSenderReportState) {
+	// SPEAKNOW FORK (rawrec45): HAM SR ÖNCE. Aşağıdaki rtpStats süzgeci
+	// (rtpstats_receiver.go checkOutOfOrderSenderReport) susturma sırasında
+	// Chrome'un RTP'si TAHMİNİ olan SR'larını kabul ediyor, açılıştan
+	// sonraki GERÇEK SR'lar (RTP'si daha küçük) "sırasız" diye düşüyor
+	// (kayıt 915: 157 sn susturma → sonraki 6 SR düştü). Ham kayıt elemeyi
+	// varış penceresiyle kendi yapıyor; buradan süzgeçsiz kopya alır.
+	// Kopya: rtpStats aşağıda klonlayıp AtAdjusted yazıyor, orijinale
+	// dokunmuyor — yine de alıcıya kendi nesnesi verilir.
+	if cb := b.getOnRtcpSenderReportHam(); cb != nil && srData != nil {
+		cb(&livekit.RTCPSenderReportState{
+			RtpTimestamp: srData.RtpTimestamp,
+			NtpTimestamp: srData.NtpTimestamp,
+			Packets:      srData.Packets,
+			Octets:       srData.Octets,
+			At:           srData.At,
+		})
+	}
+
 	b.RLock()
 	didSet := false
 	if b.rtpStats != nil {
@@ -1422,6 +1446,20 @@ func (b *BufferBase) getOnRtcpSenderReport() func() {
 	defer b.RUnlock()
 
 	return b.onRtcpSenderReport
+}
+
+// OnRtcpSenderReportHam — SPEAKNOW FORK (rawrec45), bkz. arayüz yorumu.
+func (b *BufferBase) OnRtcpSenderReportHam(fn func(*livekit.RTCPSenderReportState)) {
+	b.Lock()
+	b.onRtcpSenderReportHam = fn
+	b.Unlock()
+}
+
+func (b *BufferBase) getOnRtcpSenderReportHam() func(*livekit.RTCPSenderReportState) {
+	b.RLock()
+	defer b.RUnlock()
+
+	return b.onRtcpSenderReportHam
 }
 
 func (b *BufferBase) OnFpsChanged(f func()) {

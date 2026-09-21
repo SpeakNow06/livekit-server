@@ -1262,6 +1262,39 @@ Sunucu yayıncı ses+görüntüde `abs-capture-time` uzantısını zaten kabul e
   (2,5 sn kuyruk patlamasında bile bölüm yok), `…MuteUzun`, `TestVideoYakalamaSaatiKatmanGecisi` (SR'sız
   katman geçişi 2,000 sn); eski altınlar değişmedi (yakalama 0 → eski yol).
 
+## 33. rawrec45: HAM SR + YAYINCI SAATİYLE KESİNLEŞTİRME (2026-09-21, kayıt 915)
+**Bulgu (kayıt 915, Chrome, 157 sn susturma):** açılıştan sonraki bölüm hiç kesinleşmedi
+(`kesin=false`; SR günlüğünde açılış sonrası SR yok, öz denetim yine de −12 ms). Sebep LiveKit'in
+kendi katmanı, `rtpstats_receiver.go checkOutOfOrderSenderReport`: Chrome susturma boyunca RTP'si
+TAHMİNİ (ölçülen 8–18 kHz hızında ilerleyen) SR göndermeyi sürdürüyor, rtpstats bunları kabul ediyor
+("clock skew" diye yalnız logluyor); açılıştan sonra gelen GERÇEK SR'ların RTP'si (duran saat) daha
+küçük kaldığından "received sender report, out-of-order, skipping" diye atılıyor — 915'te 10:21:40–59
+arası 6 SR düştü, `GetSenderReportData()` hiç yenilenmedi. Kaç saniyelik susturmadan sonra olacağı
+Chrome'un SR aralığına (~3–6 sn) bağlı: ondan uzun her susturma sonrası bölüm SR'sız kalıyordu
+(913/914'te bazıları kesinleşmişti, şans).
+**Değişiklik:**
+- `pkg/sfu/buffer/buffer_base.go`: `BufferProvider.OnRtcpSenderReportHam(fn)` — `SetSenderReportData`
+  rtpstats süzgecinden ÖNCE ham kopyayı verir (arayüz + alan + setter/getter).
+- `pkg/sfu/receiver_base.go setupBuffer`: ses katman 0 için ham kanca → `rawAudio.Load().SR(sr)`.
+- `pkg/sfu/rawrec/rawrec.go`: `Writer.SR(sr)` — kanala `paket{sr}` öğesi (RTCP okuyucu goroutine'inden,
+  bloklamaz; `kapatKilit` RWMutex ile `Close`'a karşı güvenli). Döngü SR öğesini `islenen`e SAYMADAN
+  eşleyiciye verir; dosya açılmadan gelenleri (`bekleyenSR`, ≤16) açılışta, ilk paketten sonrakileri
+  verir. `GetSenderReportData()` yoklaması (her 10 paket + açılış) KALDIRILDI.
+- `pkg/sfu/rawrec/saat.go srGeldi`: bölüm kesinleştirme YAYINCI SAATİYLE — `ntpNs(sr.NtpTimestamp)`
+  (yayıncının kendi saati, RTP sayacıyla aynı makinede aynı anda) eksi yayıncı-saati çapası
+  (`anchorKaynakNs`). SR'ın varış titremesi ve yolda geçen süre sonuca girmez; sunucu saati (`At`)
+  yalnız pencere seçimi (`bolumZamanla`) ve yan JSON çapası (`anchorNs`). Çapa adayları iki uzayda
+  (`anchorAday`/`anchorAdayK`). İlk bölüm TEK SR almışsa tek adayla kesinleştirme, dar pay
+  `srTekToleransSn = 0,5 sn` (bozuk ilk SR elenir; doğrulanmış çapada pay 10 sn kalır — kuyruk
+  patlaması). Dedup RTP yerine NTP ile.
+**Testler (+4 → 26 Go testi):** `TestSesSusturmaIciSRAtilir` (915 modeli: 12 uydurma SR
+`sr_atlanan`, günlükte 5 gerçek, bölüm `mute+varis+sr` kesin, sapma 0), `TestSesTekSRCapa` (sapma 0),
+`TestSesTekBozukSRCapa` (RTP 1 saat ileri tek SR elendi, `sr_bozuk=2`, sapma = 60 ms titreme),
+`TestSesSRVarisTitremesi` (SR'lar ±80 ms titremeyle varıyor, sapma 0 — eski sunucu-saatli yol
+geçemezdi). Sahte SR kaynağı artık yazıcıya İTİYOR (`ilet`, RTCP okuyucusunun işi), NTP = sunucu −3 saat
+(ofset bağımsızlığı kanıtı). Altın SHA değişmedi; 911A son −0,031 sn, artık 8,8 ms.
+İmaj `v1.11.0-rawrec45`.
+
 ## Rebuild
 ```bash
 cd livekit-server-source            # bu repo, branch speaknow-vp9-simulcast

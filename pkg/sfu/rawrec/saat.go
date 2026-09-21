@@ -53,6 +53,10 @@ const (
 	// srToleransSn — SR'dan hesaplanan taban geçici tabandan bu kadar
 	// uzaksa SR'a güvenilmez (bozuk SR: crbug 168328), geçici kalır.
 	srToleransSn = 10.0
+	// srTekToleransSn — çapa TEK SR'a dayanıyorsa (doğrulanmamış) izin
+	// verilen düzeltme payı: varış tahmini ≤ 40 ms şaşar, bozuk SR
+	// saniyelerce — dar pay bozuğu eler (rawrec45, kayıt 915 dersi).
+	srTekToleransSn = 0.5
 	// ozDenetimEsikSn — SR duvar süresi ile yazılan süre farkı bunu aşarsa
 	// dosya "zaman-tutarsız" (Janus'un 0,5 sn uyarısı).
 	ozDenetimEsikSn = 0.5
@@ -62,20 +66,20 @@ const (
 // `bolumler[]` olarak yazılıyor.
 type sesBolum struct {
 	Sira         int      `json:"sira"`
-	RTP0         uint32   `json:"rtp0"`                   // bölümün ilk paketinin RTP damgası
-	Pts0         int64    `json:"pts0"`                   // o paketin dosya içindeki yeri (48 kHz örnek)
-	Kaynak       string   `json:"kaynak"`                 // ilk | varis | mute+varis | …+sr
-	VarisEksikSn float64  `json:"varis_eksik_sn"`         // varış farkından ölçülen eksik (sn)
-	SrEksikSn    *float64 `json:"sr_eksik_sn,omitempty"`  // SR ile kesinleşen eksik (sn)
-	Kesin        bool     `json:"kesin"`                  // taban SR ile kesinleşti mi
-	MuteSinyali  bool     `json:"mute_sinyali"`           // yayıncı mute sinyaliyle mi açıldı
-	IlkGelisNs   int64    `json:"ilk_gelis_ns"`           // ilk paketin sunucuya varışı
-	Paket        int      `json:"paket"`                  // bölümdeki paket sayısı
+	RTP0         uint32   `json:"rtp0"`                  // bölümün ilk paketinin RTP damgası
+	Pts0         int64    `json:"pts0"`                  // o paketin dosya içindeki yeri (48 kHz örnek)
+	Kaynak       string   `json:"kaynak"`                // ilk | varis | mute+varis | …+sr
+	VarisEksikSn float64  `json:"varis_eksik_sn"`        // varış farkından ölçülen eksik (sn)
+	SrEksikSn    *float64 `json:"sr_eksik_sn,omitempty"` // SR ile kesinleşen eksik (sn)
+	Kesin        bool     `json:"kesin"`                 // taban SR ile kesinleşti mi
+	MuteSinyali  bool     `json:"mute_sinyali"`          // yayıncı mute sinyaliyle mi açıldı
+	IlkGelisNs   int64    `json:"ilk_gelis_ns"`          // ilk paketin sunucuya varışı
+	Paket        int      `json:"paket"`                 // bölümdeki paket sayısı
 
-	sonRTP    uint32
-	sonPts    int64
+	sonRTP     uint32
+	sonPts     int64
 	sonGelisNs int64 // bölümün son paketinin varışı (SR'ın hangi bölüme ait olduğu bununla)
-	yazildi   bool  // bölümden en az bir paket dosyaya yazıldı (artık taban değişemez)
+	yazildi    bool  // bölümden en az bir paket dosyaya yazıldı (artık taban değişemez)
 }
 
 // srPencereTolerans — SR, bölümün son paketinden en çok bu kadar sonra
@@ -96,12 +100,14 @@ type sesSaat struct {
 	sonPts   int64
 	enSonPts int64 // atanmış en büyük pts (RED yedek kopyası ayıklaması)
 
-	muteBekliyor bool    // PubMute(true) görüldü, henüz bir bölüm açmadı
-	anchorNs     int64   // pts 0'ın sunucu saati (unix ns); 0 = bilinmiyor
-	anchorKesin  bool    // iki uyumlu SR'la doğrulandı
-	anchorAday   []int64 // ilk bölümün SR'larından adaylar (bkz. srGeldi)
+	muteBekliyor   bool    // PubMute(true) görüldü, henüz bir bölüm açmadı
+	anchorNs       int64   // pts 0'ın SUNUCU saati (unix ns); 0 = bilinmiyor. Yan JSON çapası.
+	anchorKaynakNs int64   // pts 0'ın YAYINCI saati (SR NTP'si, unix ns). Bölüm kesinleştirme.
+	anchorKesin    bool    // iki uyumlu SR'la doğrulandı
+	anchorAday     []int64 // ilk bölümün SR'larından sunucu-saati adayları (bkz. srGeldi)
+	anchorAdayK    []int64 // aynı SR'ların yayıncı-saati adayları (aynı sıra)
 
-	srSonRTP  uint32
+	srSonNTP  uint64
 	gunluk    []srOrnek // SR günlüğü, pts'li
 	srBozuk   int       // toleransı aşan SR sayısı
 	srAtlanan int       // hiçbir bölümün penceresine düşmeyen SR (susturma içi)
@@ -286,41 +292,61 @@ func (s *sesSaat) srGeldi(sr *livekit.RTCPSenderReportState) (*sesBolum, int64) 
 	if temel == 0 {
 		temel = sr.At
 	}
-	if temel == 0 || sr.RtpTimestamp == s.srSonRTP {
+	if temel == 0 || sr.NtpTimestamp == s.srSonNTP {
 		return nil, 0
 	}
-	s.srSonRTP = sr.RtpTimestamp
+	s.srSonNTP = sr.NtpTimestamp
 	b := s.bolumZamanla(temel)
 	if b == nil || sdelta(sr.RtpTimestamp, b.RTP0) < 0 {
 		s.srAtlanan++
 		return nil, 0
 	}
 	ptsSR := b.Pts0 + sdelta(sr.RtpTimestamp, b.RTP0)
+	// YAYINCI SAATİ (rawrec45): SR'ın NTP'si yayıncının kendi saati, RTP'si
+	// de kendi sayacı — ikisi aynı makinede, aynı anda alınıyor. Bölüm
+	// tabanı bu çiftle kesinleşir: ağ titremesi de, sunucu saati de, SR'ın
+	// yolda geçirdiği süre de karışmaz. Sunucu saati (`temel` = varış)
+	// yalnız pencere seçiminde ve yan JSON çapasında (anchorNs) kullanılır.
+	// Eskiden düzeltme de `temel` üstündendi: SR'ın varış titremesi kadar
+	// (1–40 ms) hata taşıyordu.
+	kaynak := ntpNs(sr.NtpTimestamp)
 	var kayma int64
 	switch {
-	case !s.anchorKesin && b.Sira == 0:
-		// ÇAPA: ilk bölümün SR'ları pts 0'ın sunucu saatini veriyor. TEK
-		// SR'a güvenilmiyor (ilk ses SR'ı bozuk olabiliyor, crbug 168328):
-		// birbirine 200 ms içinde iki örnek gelince ortalaması çapa olur,
-		// uyumsuz örnek atılır. Sonraki bölümler bu çapaya göre kesinleşir.
-		aday := temel - ptsSR*int64(time.Second)/s.hz
-		for _, eski := range s.anchorAday {
-			if d := aday - eski; d < 200*int64(time.Millisecond) && d > -200*int64(time.Millisecond) {
-				s.anchorNs = (aday + eski) / 2
+	case b.Sira == 0 && !s.anchorKesin:
+		// ÇAPA: ilk bölümün SR'ları pts 0'ın saatini veriyor (yayıncı ve
+		// sunucu saatinde ayrı ayrı). TEK SR'a tam güvenilmiyor (ilk ses
+		// SR'ı bozuk olabiliyor, crbug 168328): birbirine 200 ms içinde iki
+		// örnek gelince ortalaması çapa olur, uyumsuz örnek atılır.
+		adayS := temel - ptsSR*int64(time.Second)/s.hz
+		adayK := kaynak - ptsSR*int64(time.Second)/s.hz
+		for i, eski := range s.anchorAdayK {
+			if d := adayK - eski; d < 200*int64(time.Millisecond) && d > -200*int64(time.Millisecond) {
+				s.anchorKaynakNs = (adayK + eski) / 2
+				s.anchorNs = (adayS + s.anchorAday[i]) / 2
 				s.anchorKesin = true
 				break
 			}
 		}
 		if !s.anchorKesin {
-			s.anchorAday = append(s.anchorAday, aday)
+			s.anchorAday = append(s.anchorAday, adayS)
+			s.anchorAdayK = append(s.anchorAdayK, adayK)
 			if len(s.anchorAday) > 5 {
 				s.anchorAday = s.anchorAday[1:]
+				s.anchorAdayK = s.anchorAdayK[1:]
 			}
 		}
-	case s.anchorKesin && !b.Kesin && b.Sira > 0:
-		ptsKesin := (temel-s.anchorNs)*s.hz/int64(time.Second) - sdelta(sr.RtpTimestamp, b.RTP0)
+	case !b.Kesin && b.Sira > 0 && (s.anchorKesin || len(s.anchorAdayK) == 1):
+		// TEK ADAYLA DA KESİNLEŞTİRME (rawrec45): ilk bölüm kısa sürüp tek
+		// SR almışsa çapa doğrulanamıyor; yine de kullanılır ama düzeltme
+		// payı dar (srTekToleransSn). Doğrulanmış çapada pay geniş: kuyruk
+		// patlamasında varış tahmini saniyelerce şaşabiliyor, SR düzeltir.
+		capa, tol := s.anchorKaynakNs, srToleransSn
+		if !s.anchorKesin {
+			capa, tol = s.anchorAdayK[0], srTekToleransSn
+		}
+		ptsKesin := (kaynak-capa)*s.hz/int64(time.Second) - sdelta(sr.RtpTimestamp, b.RTP0)
 		kayma = ptsKesin - b.Pts0
-		if k := s.ornekSn(kayma); k > srToleransSn || k < -srToleransSn {
+		if k := s.ornekSn(kayma); k > tol || k < -tol {
 			s.srBozuk++
 			kayma = 0
 			break

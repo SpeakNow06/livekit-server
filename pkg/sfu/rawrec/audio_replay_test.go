@@ -47,11 +47,32 @@ import (
 	"github.com/livekit/protocol/logger"
 )
 
-// ── sahte SR kaynağı: SİMÜLE ZAMANA göre son Sender Report ──────────────────
+// ── sahte SR kaynağı ────────────────────────────────────────────────────────
+//
+// rawrec45'ten beri ses yazıcısı SR'ı YOKLAMIYOR; ham SR kanaldan itiliyor
+// (`Writer.SR`). Test, her paketten önce varış anı gelmiş SR'ları sırayla
+// iter (`ilet`) — gerçekte RTCP okuyucusunun yaptığı iş. `GetSenderReportData`
+// yalnız `srKaynak` arayüzü için duruyor (görüntü yazıcısı yokluyor).
+//
+// YAYINCI SAATİ: SR'ın NTP'si yayıncının kendi saati; testte sunucudan
+// 3 saat geride tutuluyor ki ofsetin sonuca girmediği kanıtlansın (eşleyici
+// bölümü yayıncı saatiyle kesinleştiriyor — saat.go srGeldi).
 
 type sahteSesKaynak struct {
-	now   atomic.Int64 // simüle "şimdi" (unix ns) — test her paketten önce kurar
-	srler []*livekit.RTCPSenderReportState
+	now    atomic.Int64 // simüle "şimdi" (unix ns) — test her paketten önce kurar
+	srler  []*livekit.RTCPSenderReportState
+	itilen int // kaç SR yazıcıya itildi (sıralı)
+}
+
+// yayinciSaatOfseti — yayıncı saati − sunucu saati (testte −3 saat).
+const yayinciSaatOfseti = -3 * int64(time.Hour)
+
+// ilet — varış anı `nowNs`'i geçmemiş, henüz itilmemiş SR'ları yazıcıya iter.
+func (s *sahteSesKaynak) ilet(w *Writer, nowNs int64) {
+	for s.itilen < len(s.srler) && s.srler[s.itilen].At <= nowNs {
+		w.SR(s.srler[s.itilen])
+		s.itilen++
+	}
 }
 
 func (s *sahteSesKaynak) GetSenderReportData() *livekit.RTCPSenderReportState {
@@ -74,9 +95,16 @@ func ntpTS(unixNs int64) uint64 {
 }
 
 // srEkle — (rtp, sunucu ns) çifti ekler; liste At'a göre sıralı tutulur.
-func (s *sahteSesKaynak) srEkle(rtp uint32, atNs int64) {
+// NTP yayıncı saatiyle (sunucu − 3 saat), varış sunucu saatiyle.
+func (s *sahteSesKaynak) srEkle(rtp uint32, atNs int64) { s.srEkleTitrek(rtp, atNs, 0) }
+
+// srEkleTitrek — SR'ın varışı `titreme` kadar gecikmiş/erken (ağ titremesi);
+// NTP/RTP çifti yine gerçek üretim anını taşır. Ham SR + yayıncı saatiyle
+// kesinleştirme sayesinde sonuç titremeden etkilenmemeli.
+func (s *sahteSesKaynak) srEkleTitrek(rtp uint32, atNs int64, titreme time.Duration) {
+	varis := atNs + int64(titreme)
 	s.srler = append(s.srler, &livekit.RTCPSenderReportState{
-		RtpTimestamp: rtp, NtpTimestamp: ntpTS(atNs), At: atNs, AtAdjusted: atNs,
+		RtpTimestamp: rtp, NtpTimestamp: ntpTS(atNs + yayinciSaatOfseti), At: varis,
 	})
 	sort.SliceStable(s.srler, func(i, j int) bool { return s.srler[i].At < s.srler[j].At })
 }
@@ -183,6 +211,7 @@ func sesYaz(w *Writer, k *sahteSesKaynak, p spaket, hedefIslenen uint64) {
 		w.PubMute(true)
 	}
 	k.now.Store(p.gelis.UnixNano())
+	k.ilet(w, p.gelis.UnixNano()) // paketten önce varmış ham SR'lar, sırayla
 	w.Write(p.yuk, p.rtp, 960, p.seq, p.gelis.UnixNano(), p.yak)
 	for n := 0; w.islenen.Load() < hedefIslenen; n++ {
 		if n < 1000 {
@@ -237,11 +266,12 @@ func opusYuk(i int) []byte {
 //
 // Duvar saati (sunucu varışı) ile RTP sayacını AYRI yürütüyor; olaylar
 // ikisini farklı etkiliyor:
-//   paket()   — 20 ms: ikisi de ilerler, paket üretir
-//   dtx(ms)   — ikisi de ilerler, paket ÜRETMEZ (Opus DTX)
-//   kayip(n)  — n paket "kaybolur": ikisi de ilerler, seq atlar
-//   dur(ms)   — YALNIZ duvar ilerler (track durdu: replaceTrack(null))
-//   srEkle()  — o anki (rtp, duvar) çifti kaynağa
+//
+//	paket()   — 20 ms: ikisi de ilerler, paket üretir
+//	dtx(ms)   — ikisi de ilerler, paket ÜRETMEZ (Opus DTX)
+//	kayip(n)  — n paket "kaybolur": ikisi de ilerler, seq atlar
+//	dur(ms)   — YALNIZ duvar ilerler (track durdu: replaceTrack(null))
+//	srEkle()  — o anki (rtp, duvar) çifti kaynağa
 type yayinci struct {
 	wallNs int64
 	rtp    uint32
@@ -300,6 +330,7 @@ func sesKos(t *testing.T, k *sahteSesKaynak, dizi []spaket) ([]oggPaket, map[str
 	dir := t.TempDir()
 	w := yeniSesYazici(t, dir, k, false)
 	yol := sesBesle(t, w, k, dir, dizi, birBlok)
+	k.ilet(w, 1<<62) // son paketten sonra gelen SR'lar da kapanıştan önce
 	w.Close()
 	if d := w.düşen.Load(); d != 0 {
 		t.Fatalf("test kanalı taşırdı: %d paket düştü", d)
@@ -451,7 +482,7 @@ func fiksturPaketleri(t *testing.T, fx *fikstur, k *sahteSesKaynak, rtpGercek bo
 		jitter := time.Duration((i*7919)%23-11) * time.Millisecond
 		dizi = append(dizi, spaket{
 			rtp: fx.FirstRTP + rel, seq: seq,
-			gelis: t0.Add(time.Duration(konum*1e9/48000)).Add(jitter),
+			gelis: t0.Add(time.Duration(konum * 1e9 / 48000)).Add(jitter),
 			yuk:   opusYuk(i),
 		})
 		dogru = append(dogru, konum)
@@ -489,6 +520,7 @@ func sesFiksturKos(t *testing.T, etiket string, rtpGercek bool) ([]oggPaket, []i
 	dir := t.TempDir()
 	w := yeniSesYazici(t, dir, k, false)
 	yol := sesBesle(t, w, k, dir, dizi, birBlok)
+	k.ilet(w, 1<<62)
 	w.Close()
 	if d := w.düşen.Load(); d != 0 {
 		t.Fatalf("test kanalı taşırdı: %d paket düştü", d)
@@ -800,7 +832,7 @@ func TestSesBayatIlkPaket(t *testing.T) {
 	d = append(d, dizi(k, y, 300, 50, nil)...)
 	y.dur(3000)
 	bayat := y.paket()
-	bayat.rtp -= 3000 * 48 // durmadan ÖNCEKİ saatten kalma damga
+	bayat.rtp -= 3000 * 48       // durmadan ÖNCEKİ saatten kalma damga
 	y.dogru[len(y.dogru)-1] = -1 // bayat paketin yeri tanımsız, sayılmaz
 	d = append(d, bayat)
 	d = append(d, dizi(k, y, 300, 50, nil)...)
@@ -1021,5 +1053,155 @@ func TestSesYakalamaSaatiMuteUzun(t *testing.T) {
 	bl := bolumler(t, yan)
 	if enB > 0.0005 || len(bl) != 2 || bl[1]["kaynak"] != "act" || bl[1]["mute_sinyali"] != true {
 		t.Fatalf("sapma %.4f bölümler %v", enB, bl)
+	}
+}
+
+// ── rawrec45: HAM SR + YAYINCI SAATİ ─────────────────────────────────────────
+
+// srGunlugu — yan JSON'daki kabul edilmiş SR sayısı.
+func srGunlugu(t *testing.T, yan map[string]any) int {
+	t.Helper()
+	g, _ := yan["sr_gunlugu"].([]any)
+	return len(g)
+}
+
+// TestSesSusturmaIciSRAtilir — KAYIT 915 MODELİ. Susturma boyunca Chrome
+// RTP'si tahmini (yavaş ilerleyen) SR göndermeyi sürdürür; açılıştan sonra
+// gerçek SR'lar gelir. LiveKit'in istatistik katmanı gerçek olanları
+// "sırasız" diye atıyordu → bölüm hiç kesinleşmiyordu. Ham SR yolu hepsini
+// alır, susturma içindekileri varış penceresiyle eler, gerçek olanla
+// tabanı kesinleştirir.
+func TestSesSusturmaIciSRAtilir(t *testing.T) {
+	k := &sahteSesKaynak{}
+	y := yeniYayinci(t0(), 500_000)
+	y.jitter = func(i int) time.Duration {
+		if i == 200 {
+			return 45 * time.Millisecond // açılış sonrası ilk paket geç: varış tahmini 45 ms şaşar
+		}
+		return 0
+	}
+	uydurma := 0
+	d := dizi(k, y, 700, 150, func(i int, y *yayinci) bool {
+		if i == 200 {
+			// 60 sn susturma; her 5 sn'de RTP'si ~8 kHz hızında "ilerleyen"
+			// uydurma SR (915'te ölçülen: 8–18 kHz).
+			for adim := 1; adim <= 12; adim++ {
+				y.dur(5000)
+				k.srEkle(y.rtp+uint32(adim*5*8000), y.wallNs)
+				uydurma++
+			}
+			return true
+		}
+		return false
+	})
+	pk, yan := sesKos(t, k, d)
+	enB, at := enBuyukSapma(t, pk, y.dogru)
+	bl := bolumler(t, yan)
+	oz := ozDenetim(t, yan)
+	t.Logf("susturma içi SR: sapma %.4f (paket %d) sr_gunlugu=%d oz=%v bl=%v", enB, at, srGunlugu(t, yan), oz, bl)
+	if len(bl) != 2 || bl[1]["kesin"] != true || bl[1]["kaynak"] != "mute+varis+sr" {
+		t.Fatalf("açılış sonrası bölüm gerçek SR ile kesinleşmeliydi: %v", bl)
+	}
+	if oz["sr_atlanan"].(float64) != float64(uydurma) {
+		t.Fatalf("susturma içi %d uydurma SR'ın hepsi elenmeliydi: oz=%v", uydurma, oz)
+	}
+	if srGunlugu(t, yan) != 5 {
+		t.Fatalf("günlükte yalnız gerçek SR'lar olmalı (5): %d", srGunlugu(t, yan))
+	}
+	if enB > 0.002 {
+		t.Fatalf("sapma %.4f sn (SR kesinleştirince ≤2 ms)", enB)
+	}
+}
+
+// TestSesTekSRCapa — ilk bölüm kısa, TEK SR almış (çapa doğrulanamıyor);
+// sonraki bölüm o tek adayla, dar payla (0,5 sn) yine kesinleşir.
+func TestSesTekSRCapa(t *testing.T) {
+	k := &sahteSesKaynak{}
+	y := yeniYayinci(t0(), 500_000)
+	y.jitter = func(i int) time.Duration {
+		if i == 100 {
+			return 60 * time.Millisecond
+		}
+		return 0
+	}
+	d := dizi(k, y, 600, 250, func(i int, y *yayinci) bool { // SR: i=0 (tek), 250, 500
+		if i == 100 {
+			y.dur(4000)
+			return true
+		}
+		return false
+	})
+	pk, yan := sesKos(t, k, d)
+	enB, at := enBuyukSapma(t, pk, y.dogru)
+	bl := bolumler(t, yan)
+	oz := ozDenetim(t, yan)
+	t.Logf("tek SR çapa: sapma %.4f (paket %d) oz=%v bl=%v", enB, at, oz, bl)
+	if len(bl) != 2 || bl[1]["kesin"] != true || oz["kesin_bolum"].(float64) != 2 {
+		t.Fatalf("tek adayla kesinleşmeliydi: oz=%v bl=%v", oz, bl)
+	}
+	if enB > 0.002 {
+		t.Fatalf("sapma %.4f sn (≤2 ms)", enB)
+	}
+}
+
+// TestSesTekBozukSRCapa — tek aday BOZUK (crbug 168328: RTP 1 saat ileri):
+// dar pay onu eler, bölüm geçici (varış) tabanla kalır, sapma titreme kadar.
+func TestSesTekBozukSRCapa(t *testing.T) {
+	k := &sahteSesKaynak{}
+	y := yeniYayinci(t0(), 500_000)
+	y.jitter = func(i int) time.Duration {
+		if i == 100 {
+			return 60 * time.Millisecond
+		}
+		return 0
+	}
+	d := dizi(k, y, 600, 250, func(i int, y *yayinci) bool {
+		if i == 100 {
+			y.dur(4000)
+			return true
+		}
+		return false
+	})
+	k.srler[0].RtpTimestamp += 3600 * 48000 // bozuk ilk SR
+	pk, yan := sesKos(t, k, d)
+	enB, at := enBuyukSapma(t, pk, y.dogru)
+	bl := bolumler(t, yan)
+	oz := ozDenetim(t, yan)
+	t.Logf("tek bozuk SR: sapma %.4f (paket %d) oz=%v bl=%v", enB, at, oz, bl)
+	if len(bl) != 2 || bl[1]["kesin"] != false || oz["sr_bozuk"].(float64) < 1 {
+		t.Fatalf("bozuk tek aday elenmeli, bölüm geçici kalmalıydı: oz=%v bl=%v", oz, bl)
+	}
+	if enB > 0.065 {
+		t.Fatalf("geçici taban titreme kadar (≤65 ms) şaşmalı: %.4f", enB)
+	}
+}
+
+// TestSesSRVarisTitremesi — SR'lar ±80 ms titremeyle VARIYOR (ağ), NTP/RTP
+// çifti doğru. Yayıncı saatiyle kesinleştirme titremeden etkilenmez:
+// eski (sunucu saatli) yol çapayı ve tabanı onlarca ms şaşırtırdı.
+func TestSesSRVarisTitremesi(t *testing.T) {
+	k := &sahteSesKaynak{}
+	y := yeniYayinci(t0(), 500_000)
+	d := dizi(k, y, 800, 50, func(i int, y *yayinci) bool {
+		if i == 400 {
+			y.dur(3000)
+			return true
+		}
+		return false
+	})
+	for i, sr := range k.srler {
+		sr.At += int64((i%2)*2-1) * 80 * int64(time.Millisecond)
+	}
+	sort.SliceStable(k.srler, func(i, j int) bool { return k.srler[i].At < k.srler[j].At })
+	pk, yan := sesKos(t, k, d)
+	enB, at := enBuyukSapma(t, pk, y.dogru)
+	bl := bolumler(t, yan)
+	oz := ozDenetim(t, yan)
+	t.Logf("SR varış titremesi: sapma %.4f (paket %d) oz=%v", enB, at, oz)
+	if len(bl) != 2 || bl[1]["kesin"] != true {
+		t.Fatalf("bölüm kesinleşmeliydi: %v", bl)
+	}
+	if enB > 0.002 {
+		t.Fatalf("titremeli SR'la sapma %.4f sn (yayıncı saatiyle ≤2 ms olmalı)", enB)
 	}
 }

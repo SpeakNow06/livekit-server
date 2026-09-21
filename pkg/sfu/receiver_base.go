@@ -35,8 +35,8 @@ import (
 
 	"github.com/livekit/livekit-server/pkg/sfu/audio"
 	"github.com/livekit/livekit-server/pkg/sfu/audiodenoise"
-	"github.com/livekit/livekit-server/pkg/sfu/rawrec"
 	"github.com/livekit/livekit-server/pkg/sfu/buffer"
+	"github.com/livekit/livekit-server/pkg/sfu/rawrec"
 	"github.com/livekit/livekit-server/pkg/sfu/rtpstats"
 	"github.com/livekit/livekit-server/pkg/sfu/streamtracker"
 	sfuutils "github.com/livekit/livekit-server/pkg/sfu/utils"
@@ -798,6 +798,17 @@ func (r *ReceiverBase) setupBuffer(buff buffer.BufferProvider, layer int32, rtt 
 			rt.ForwardRTCPSenderReport(r.params.Codec.PayloadType, layer, srData)
 		}
 	})
+	// SPEAKNOW FORK (rawrec45): HAM SR → ham ses kaydı. Yukarıdaki yol
+	// istatistik katmanının SÜZDÜĞÜ SR'ı veriyor; o süzgeç susturma
+	// sonrası gerçek SR'ları atıyor (kayıt 915 — gerekçe buffer_base.go
+	// SetSenderReportData). Yazıcı varsa alır, yoksa düşer; bloklamaz.
+	if layer == 0 && mime.IsMimeTypeStringAudio(r.params.Codec.MimeType) {
+		buff.OnRtcpSenderReportHam(func(sr *livekit.RTCPSenderReportState) {
+			if aw := r.rawAudio.Load(); aw != nil {
+				aw.SR(sr)
+			}
+		})
+	}
 	buff.OnVideoSizeChanged(func(videoSize []buffer.VideoSize) {
 		r.videoSizeMu.Lock()
 		if r.videoLayerMode == livekit.VideoLayer_MULTIPLE_SPATIAL_LAYERS_PER_STREAM {
