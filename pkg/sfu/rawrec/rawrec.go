@@ -56,7 +56,9 @@ package rawrec
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
@@ -103,10 +105,11 @@ const lookupEvery = 200 * time.Millisecond
 const hedefYokNotuSonra = 10 * time.Second
 
 var (
-	once    sync.Once
-	enabled bool
-	rdb     *redis.Client
-	waitFor time.Duration
+	once         sync.Once
+	enabled      bool
+	rdb          *redis.Client
+	waitFor      time.Duration
+	yazmaGecikme time.Duration
 	// ⚠ errLogged BURADA DEĞİL — yazıcı başına (kayıt 178'de öğrenildi).
 	// Paket düzeyinde tekken SÜREÇ BOYUNCA tek satır yazılıyordu: ses
 	// yazıcısının "dosya açılamadı" hatası logu tüketti ve VİDEO yazıcısının
@@ -196,6 +199,14 @@ func initOnce() {
 	// girmez (ses ve görüntüde aynı kural, bkz. hedef.baslangic). Bellek:
 	// ses 2 sn × 50 paket × ~90 B ≈ 9 KB; görüntü ≈ 0,5 MB.
 	waitFor = time.Duration(envInt("SN_RAWREC_WAIT", 2)) * time.Second
+	// YAZMA GECİKMESİ (Adım 2, saat.go): ses paketleri diske bu kadar
+	// geriden yazılır ki susturma sonrası bölümün tabanı ilk Sender Report
+	// ile kesinleştikten SONRA yazılsın. Kayıt canlı değil, bedeli yok:
+	// 10 sn × 50 paket × ~90 B ≈ 45 KB. 10 sn neden: 911 fikstüründe
+	// unmute sonrası ilk SR 2-8 sn arasında geldi (Chrome ~5 sn'de bir
+	// yolluyor ama susturma içindekiler atılıyor); 6 sn üç bölümün
+	// üçünü de kaçırıyordu, 10 sn hepsini yakalıyor.
+	yazmaGecikme = time.Duration(envInt("SN_RAWREC_YAZMA_GECIKME", 10)) * time.Second
 	pinHigh = envOr("SN_RAWREC_PIN_HIGH", "1") != "0"
 	kfEnÇokKare = envInt("SN_RAWREC_KEYFRAME_MAX_KARE", 24)
 	kfEnAzSn = time.Duration(envInt("SN_RAWREC_KEYFRAME_MIN_SN", 2)) * time.Second
@@ -246,6 +257,10 @@ type hedef struct {
 	// Kaydın başlangıç anı (unix ms) — kayıt servisi yazıyor (2026-09-13,
 	// kayıt 882). Yoksa/0 ise eski davranış: tampondaki her şey dosyaya girer.
 	BaslangicMs int64 `json:"baslangic_ms,omitempty"`
+	// Identity — track'in sahibi (webhook `sn:rawrec:track:<sid>` değerinden,
+	// Adım 4). Yan JSON'a `participant` olarak gidiyor: postprocess kamera ↔
+	// mikrofon eşlemesini klasör sırasına değil KİŞİYE göre yapsın.
+	Identity string `json:"-"`
 }
 
 // baslangic — kayıt düğmesine basıldığı an (anahtar taşıyorsa), yoksa sıfır
@@ -272,7 +287,8 @@ func (h *hedef) baslangic() time.Time {
 
 // trackEşleme — track anahtarının içeriği (webhook yazıyor).
 type trackEşleme struct {
-	Room string `json:"room"`
+	Room     string `json:"room"`
+	Identity string `json:"identity,omitempty"` // yayıncının kimliği (Adım 4)
 }
 
 // paket — kanaldan geçen iş birimi. `ExtPacket`'ı TUTMUYORUZ: dayanağı
@@ -305,6 +321,23 @@ type Writer struct {
 
 	düşen     atomic.Uint64
 	errLogged atomic.Bool
+
+	// islenen — döngünün kanaldan aldığı paket sayısı (tanı + testlerin
+	// deterministik beslemesi: test, paketin işlendiğini bununla bekliyor).
+	islenen atomic.Uint64
+	// muteSayac — yayıncı mute sinyali kaç kez geldi (PubMute). Döngü
+	// değişimi görünce eşleyiciye "mute bekliyor" der (saat.go: eşik 0,2 sn).
+	muteSayac atomic.Int64
+}
+
+// PubMute — yayıncı track'i susturdu/açtı (ReceiverBase.UpdateTrackInfo →
+// trackInfo.Muted). Yalnız SUSTURMA sayılıyor: eşleyici bir sonraki bölüm
+// açılışında sıkı eşiğe geçer. Medya yolundan çağrılabilir, bloklamaz.
+func (w *Writer) PubMute(muted bool) {
+	if w == nil || !muted {
+		return
+	}
+	w.muteSayac.Add(1)
 }
 
 // srKaynak — yalnız ihtiyacımız olan kısım. Arayüzü dar tutuyoruz ki test
@@ -372,11 +405,18 @@ func kaynakAdı(ti *livekit.TrackInfo) string {
 }
 
 // Write — paketi sıraya koyar. ASLA BLOKLAMAZ.
-func (w *Writer) Write(payload []byte, rtpTS uint32, örnek uint32, seq uint16) {
+//
+// `gelişNs`: paketin tampona VARIŞ anı (`extPkt.Arrival`, unix ns). Eşleyici
+// (saat.go) durmuş saati bununla ölçüyor; SFU kuyruğunun gecikmesi hesaba
+// karışmasın diye `time.Now()` değil. 0 verilirse şimdi.
+func (w *Writer) Write(payload []byte, rtpTS uint32, örnek uint32, seq uint16, gelişNs int64) {
 	if w == nil || w.closed.Load() || len(payload) == 0 {
 		return
 	}
 	an := time.Now()
+	if gelişNs > 0 {
+		an = time.Unix(0, gelişNs)
+	}
 	// RED SARMALINI AÇ (RFC 2198). Mikrofon `audio/red` ile yayınlanıyor
 	// (ölçüldü, kayıt 169: mime=audio/red) — yani yük saf Opus DEĞİL, yedekli
 	// bir kap. Ogg/Opus'a olduğu gibi yazılsaydı dosya çözülemezdi.
@@ -462,27 +502,117 @@ func (w *Writer) loop() {
 		// `forwardRTP` çoktan dönmüş, tampon havuza geri verilmiş oluyor ve
 		// içindeki SR başka bir oturuma ait. Artık her N pakette bir
 		// örnekleyip SONUNCUSUNU saklıyoruz.
-		sonSR    *livekit.RTCPSenderReportState
-		srSayaç  int
-		srGunluk []srOrnek
-		srSonRTP uint32
+		sonSR   *livekit.RTCPSenderReportState
+		srSayaç int
+		// SR günlüğü artık EŞLEYİCİDE (`saat.gunluk`, pts'li).
 
 		// SAĞLIK: yazıcının kendi durumu (bkz. saglik.go). Postprocess
 		// artık YALNIZ buna bakıyor, tarayıcı kopyasıyla karşılaştırma yok.
 		sagl          = yeniSaglik()
 		redKurtarilan uint64 // RED yedeğinden kurtarılan (delik dolduran) kare
+
+		// ── SAAT EŞLEYİCİ + YAZMA GECİKMESİ KUYRUĞU (Adım 2, saat.go) ──
+		// Paketin dosya içindeki yeri (pts) eşleyiciden; dosyaya
+		// `yazmaGecikme` geriden yazılıyor ki bölüm tabanı SR ile
+		// kesinleşebilsin. Kuyruk akış saatiyle (son varış) boşalıyor,
+		// kapanışta tamamen.
+		saat        = yeniSesSaat(w.clockRate)
+		kuyruk      []kuyrukOgesi
+		gorulenMute int64
 	)
+
+	// yazPaket — kuyruktan çıkan paketi dosyaya yaz. Granül = pts + örnek
+	// (paketin BİTİŞİ). RED yedeği yalnız delik doldurur; eş damga ileri
+	// itilir (eski davranış, yalnız kaynağı RTP yerine pts).
+	yazPaket := func(e kuyrukOgesi) {
+		if ogg == nil {
+			return
+		}
+		g := uint64(e.pts) + uint64(e.p.örnek)
+		if e.p.yedek {
+			if g <= yazılan {
+				return
+			}
+			redKurtarilan++
+		}
+		if g <= yazılan {
+			yazılan += uint64(e.p.örnek)
+		} else {
+			yazılan = g
+		}
+		ogg.write(e.p.payload, yazılan)
+		sonRel = uint32(e.pts)
+		kare++
+		sagl.kareYazildi(e.p.geliş)
+		if e.bolum != nil {
+			e.bolum.yazildi = true
+		}
+	}
+	// bosalt — akış saatine göre gecikmesi dolan paketleri yaz.
+	bosalt := func(hepsi bool) {
+		n := 0
+		for n < len(kuyruk) {
+			if !hepsi && saat.sonGelis.Sub(kuyruk[n].p.geliş) < yazmaGecikme {
+				break
+			}
+			yazPaket(kuyruk[n])
+			n++
+		}
+		if n > 0 {
+			kuyruk = append(kuyruk[:0], kuyruk[n:]...)
+		}
+	}
+	// kuyrugaAl — paketi eşleyiciden geçirip kuyruğa koy.
+	kuyrugaAl := func(p paket) {
+		if n := w.muteSayac.Load(); n != gorulenMute {
+			gorulenMute = n
+			saat.muteSinyali()
+		}
+		pts, yeni := saat.yerlestir(p.rtp, p.geliş, p.seq, p.yedek)
+		if p.yedek {
+			// Kopya mı delik mi: atanmış en büyük pts'nin gerisindeyse ya da
+			// eşitse zaten var (kuyrukta ya da dosyada) → at.
+			if pts <= saat.enSonPts {
+				return
+			}
+			saat.enSonPts = pts
+		}
+		if yeni != nil {
+			w.log.Infow("rawrec ses: BÖLÜM TABANI (durmuş saat)",
+				"track", w.trackID, "sid", w.sid, "bolum", yeni.Sira,
+				"eksik_sn", yuvarla(yeni.VarisEksikSn), "kaynak", yeni.Kaynak,
+				"pts0_sn", yuvarla(saat.ornekSn(yeni.Pts0)))
+		}
+		kuyruk = append(kuyruk, kuyrukOgesi{p: p, pts: pts, bolum: saat.simdiki()})
+	}
+	// srIsle — Sender Report eşleyiciye; bir bölümün tabanı kesinleştiyse
+	// kuyruktaki o ve sonraki bölümlerin paketleri kayar.
+	srIsle := func(sr *livekit.RTCPSenderReportState) {
+		b, kayma := saat.srGeldi(sr)
+		if kayma == 0 {
+			return
+		}
+		for i := range kuyruk {
+			if kuyruk[i].bolum != nil && kuyruk[i].bolum.Sira >= b.Sira {
+				kuyruk[i].pts += kayma
+			}
+		}
+		w.log.Infow("rawrec ses: bölüm tabanı SR ile kesinleşti",
+			"track", w.trackID, "sid", w.sid, "bolum", b.Sira,
+			"kayma_ms", yuvarla(saat.ornekSn(kayma)*1000),
+			"varis_eksik_sn", yuvarla(b.VarisEksikSn), "sr_eksik_sn", yuvarla(*b.SrEksikSn))
+	}
 
 	kapat := func() {
 		if ogg != nil {
+			bosalt(true)
 			ogg.finish()
 		}
 		if fh != nil {
 			fh.Close()
 		}
 		if yol != "" {
-			w.yanJSON(yol, ilkAn, kare, ilkRTP, sonRel, sonSR, sagl, redKurtarilan,
-				srGunluk)
+			w.yanJSON(yol, ilkAn, kare, ilkRTP, sonRel, sonSR, sagl, redKurtarilan, saat, h)
 		}
 	}
 	defer kapat()
@@ -543,6 +673,7 @@ func (w *Writer) loop() {
 			if !ok {
 				return // kanal kapandı → defer kapat() dosyayı bitirir
 			}
+			w.islenen.Add(1)
 			if vazgeç {
 				continue
 			}
@@ -614,79 +745,44 @@ func (w *Writer) loop() {
 				}
 				ogg = newOggYazıcı(fh, kanal, seriNo(string(w.trackID)))
 				for _, b := range bekleyen {
-					rel := b.rtp - ilkRTP
-					g := uint64(rel) + uint64(b.örnek)
-					if b.yedek && g <= yazılan {
-						continue
-					}
-					if b.yedek {
-						redKurtarilan++
-					}
-					yazılan = g
-					ogg.write(b.payload, yazılan)
-					sonRel = rel
-					kare++
-					sagl.kareYazildi(b.geliş)
+					kuyrugaAl(b)
 				}
 				bekleyen = nil
+				if sr := w.buff.GetSenderReportData(); sr != nil && sr.NtpTimestamp != 0 {
+					sonSR = sr
+					srIsle(sr)
+				}
+				bosalt(false)
 				continue
 			}
 
-			// ── 3. Normal akış ──────────────────────────────────────────
-			rel := p.rtp - ilkRTP
-			g := uint64(rel) + uint64(p.örnek)
-			// YEDEK BLOK YALNIZ DELİK DOLDURUR. Damgası zaten yazılmış bir
-			// yere denk geliyorsa kopyadır, atılır — yoksa dosya şişer ve
-			// ses tekrarlar. Delik varsa (asıl paket kaybolmuş) yazılır:
-			// SFU dosyası tarayıcı kopyası kadar eksiksiz olur.
-			if p.yedek {
-				if g <= yazılan {
-					continue
-				}
-				redKurtarilan++
-			}
-			// Granül ARTAN olmalı; SFU sıralı veriyor ama RED/PLC ile eş
-			// damga gelebiliyor. Eşitse bir kare ileri it (bugünkü Python
-			// yazıcının monotonluk koruması ile aynı).
-			if g <= yazılan {
-				yazılan += uint64(p.örnek)
-			} else {
-				yazılan = g
-			}
-			ogg.write(p.payload, yazılan)
-			sonRel = rel
-			kare++
-			sagl.kareYazildi(p.geliş)
+			// ── 3. Normal akış: EŞLEYİCİ → KUYRUK → (gecikmeli) DOSYA ────
+			// Eski kod burada `rel = rtp − ilkRTP` ile doğrudan yazıyordu;
+			// susturmada duran RTP saati dosyadan süre siliyordu (kayıt 911).
+			// Artık yer eşleyiciden (saat.go), yazım kuyruktan (yazPaket).
+			kuyrugaAl(p)
 
-			// Saniyede ~50 paket → 50'de bir ≈ saniyede bir örnek. SR de
-			// zaten saniyede bir geliyor, daha sık bakmanın anlamı yok.
+			// SR'yi AKIŞ SÜRERKEN topla (kayıt 172: kapanışta okunan SR
+			// 74,8 dk bayattı). 10 pakette bir: SR ~5 sn'de bir güncelleniyor,
+			// sık bakmak yeni örnek üretmiyor ama güncellemeyi GECİKMEDEN
+			// yakalıyor — bölüm tabanının kesinleşmesi buna bağlı.
 			srSayaç++
-			// 50 → 10 (2026-09-05): SR'ın kendisi seste ~5 sn'de bir
-			// güncelleniyor, sık bakmak yeni örnek üretmiyor ama
-			// güncellemeyi GECİKMEDEN yakalıyor. Maliyeti bir işaretçi
-			// okuması.
 			if srSayaç%10 == 0 {
 				if sr := w.buff.GetSenderReportData(); sr != nil && sr.NtpTimestamp != 0 {
 					sonSR = sr
-					// SR GÜNLÜĞÜ — seste katman yok, ama yayıncının SAAT
-					// KAYMASINI ölçmek için şart: ses ile görüntü 45 dakikada
-					// birbirinden ayrılıyorsa kaynağı burada görünür.
-					// Gerekçe: `srOrnek` başlığı.
-					temel := sr.AtAdjusted
-					if temel == 0 {
-						temel = sr.At
-					}
-					if temel != 0 && sr.RtpTimestamp != srSonRTP &&
-						len(srGunluk) < srGunluguUstSinir {
-						srSonRTP = sr.RtpTimestamp
-						srGunluk = append(srGunluk, srOrnek{
-							Katman: 0, RTP: sr.RtpTimestamp, AtNs: temel,
-							NtpNs: ntpNs(sr.NtpTimestamp)})
-					}
+					srIsle(sr)
 				}
 			}
+			bosalt(false)
 		}
 	}
+}
+
+// kuyrukOgesi — yazma gecikmesi kuyruğundaki paket: yeri (pts) ve bölümü.
+type kuyrukOgesi struct {
+	p     paket
+	pts   int64
+	bolum *sesBolum
 }
 
 func (w *Writer) hedefAra() *hedef { return hedefAra(w.sid, w.log) }
@@ -736,6 +832,7 @@ func hedefAraRedis(sid string, log logger.Logger) *hedef {
 	if json.Unmarshal(rv, &h) != nil || h.Dir == "" || h.RecordingID == 0 {
 		return nil
 	}
+	h.Identity = te.Identity
 	return &h
 }
 
@@ -821,8 +918,9 @@ func (w *Writer) dosyaAç(h *hedef) (*os.File, string, error) {
 	// bozar. Önek bunu imkânsız kılıyor. postprocess dosyayı ADINDAN değil
 	// yan JSON'daki `capa_kaynak`tan tanıyor (`_sfu_asil_tarayici_yedek`),
 	// yani ad serbest.
-	yol := filepath.Join(d, "01_sfu_"+string(w.trackID)+".opus")
-	fh, err := os.Create(yol)
+	fh, yol, err := dosyaAcExcl(d, func(n int) string {
+		return fmt.Sprintf("%02d_sfu_%s.opus", n, string(w.trackID))
+	}, 1)
 	if err != nil {
 		return nil, "", err
 	}
@@ -831,20 +929,52 @@ func (w *Writer) dosyaAç(h *hedef) (*os.File, string, error) {
 	return fh, yol, nil
 }
 
+// dosyaAcExcl — dosyayı YALNIZ YOKSA açar; varsa numarayı artırır.
+//
+// NEDEN (Adım 1, 2026-09-21): tam yeniden bağlanmada livekit-client o an
+// susturulmuş mikrofonu ve ekran paylaşımını AYNI MediaStreamTrack (aynı
+// UUID = bizim trackID) ile yeniden yayınlıyor (`republishAllTracks`:
+// `!track.isMuted && source !== ScreenShare` şartı). SFU'da yeni receiver →
+// yeni yazıcı → aynı ad → `os.Create` (O_TRUNC) kopukluktan ÖNCEKİ parçayı
+// sıfırlıyordu. Artık `02_sfu_…`, `03_sfu_…` açılır; postprocess dosya adına
+// değil yan JSON'daki `sid`e bakıyor, desenler (`*_sfu_*`, uzantı) aynı.
+func dosyaAcExcl(d string, ad func(n int) string, n int) (*os.File, string, error) {
+	for ; n <= 99; n++ {
+		yol := filepath.Join(d, ad(n))
+		fh, err := os.OpenFile(yol, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err == nil {
+			return fh, yol, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return nil, "", err
+		}
+	}
+	return nil, "", fmt.Errorf("rawrec: %s içinde 99 dosya adı da dolu", d)
+}
+
 // yanJSON — postprocess'in okuduğu çapa dosyası.
 //
 // Alanlar bugünkü tarayıcı yolunun ürettiğiyle AYNI (postprocess değişmiyor).
 // Fark: `capture_anchor` TAHMİN değil, Sender Report'tan hesap.
 func (w *Writer) yanJSON(yol string, ilkAn time.Time, kare int, ilkRTP, sonRel uint32,
 	sr *livekit.RTCPSenderReportState, sagl *saglik, redKurtarilan uint64,
-	srGunluk []srOrnek) {
+	saat *sesSaat, h *hedef) {
+	ek := map[string]any{
+		"bolumler":         saat.bolumler,
+		"oz_denetim":       saat.ozDenetim(),
+		"yazma_gecikme_sn": yazmaGecikme.Seconds(),
+	}
+	if h != nil && h.Identity != "" {
+		ek["participant"] = h.Identity
+	}
 	yanJSONYaz(yanParam{
 		yol: yol, sid: w.sid, ilkAn: ilkAn, kare: kare, ilkRTP: ilkRTP, sonRel: sonRel,
 		clockRate: w.clockRate, sr: sr, buff: w.buff, log: w.log,
 		trackID: w.trackID, düşen: w.düşen.Load(), etiket: "ses",
-		srGunluk: srGunluk, capaKatman: 0,
+		srGunluk: saat.gunluk, capaKatman: 0,
 		errBayrak: &w.errLogged, sagl: sagl, redKurt: redKurtarilan,
 		kaynak: kaynakTuru(w.trackInfo),
+		ptsUzayi: true, anchorNs: saat.anchorNs, ek: ek,
 	})
 }
 
@@ -867,6 +997,10 @@ type srOrnek struct {
 	RTP    uint32 `json:"rtp"`
 	AtNs   int64  `json:"at_ns"`  // SUNUCU saati (AtAdjusted, yoksa At)
 	NtpNs  int64  `json:"ntp_ns"` // YAYINCININ kendi saati, ham SR'dan
+	// Pts — SR'ın damgasının DOSYA İÇİNDEKİ yeri (48 kHz örnek), ses
+	// eşleyicisinden (saat.go). Susturmalı akışta ham RTP merdiven, pts
+	// düz: çapa fit'i ve postprocess'in kayma ölçümü bunu okumalı.
+	Pts *int64 `json:"pts,omitempty"`
 }
 
 // ntpNs — SR'ın NTP damgasını unix nanosaniyeye çevirir.
@@ -935,6 +1069,14 @@ type yanParam struct {
 	srGunluk   []srOrnek
 	kareGunluk []kareOrnek
 	capaKatman int32 // `ilkRTP` hangi katmanın damga uzayında (ses: 0)
+	// ptsUzayi — SR örnekleri `Pts` taşıyor (ses eşleyicisi): çapa fit'i
+	// ham RTP yerine dosya PTS'i üstünden yapılır (susturmada RTP merdiven).
+	ptsUzayi bool
+	// anchorNs — eşleyicinin ilk bölümden bildiği pts 0 saati; fit için
+	// yeterli örnek yoksa tek-SR yolu yerine bu kullanılır.
+	anchorNs int64
+	// ek — yazıcıya özgü fazladan alanlar (bolumler, oz_denetim, participant).
+	ek map[string]any
 }
 
 // capaFit — SR günlüğündeki BÜTÜN örneklerden çapa ve saat kayması.
@@ -1083,8 +1225,25 @@ func yanJSONYaz(p yanParam) {
 	// Bütün SR günlüğüne doğru uydurup çapayı KAYDIN BAŞINDA okuyoruz.
 	// Yeterli örnek yoksa aşağıdaki tek-SR yoluna düşülüyor. Gerekçe:
 	// `capaFit` başlığı.
-	if capaNs, ppm, artik, n, ok := capaFit(p.srGunluk, p.capaKatman,
-		ilkRTP, p.clockRate); ok {
+	for k, v := range p.ek {
+		veri[k] = v
+	}
+	// PTS UZAYI (Adım 2): ses yazıcısında SR örneklerinin `pts`i var; fit
+	// `at − pts/hz` üstünden. Ham RTP ile yapılsaydı susturmalı dosyada
+	// merdiven veriye doğru uydurulur, çapa saçmalardı (911: 50,7 sn).
+	fitOrn, fitIlk := p.srGunluk, ilkRTP
+	if p.ptsUzayi {
+		fitOrn = make([]srOrnek, 0, len(p.srGunluk))
+		for _, o := range p.srGunluk {
+			if o.Pts != nil && *o.Pts >= 0 {
+				fitOrn = append(fitOrn, srOrnek{Katman: o.Katman, RTP: uint32(*o.Pts),
+					AtNs: o.AtNs, NtpNs: o.NtpNs})
+			}
+		}
+		fitIlk = 0
+	}
+	if capaNs, ppm, artik, n, ok := capaFit(fitOrn, p.capaKatman,
+		fitIlk, p.clockRate); ok {
 		veri["capture_anchor"] = time.Unix(capaNs/1e9, capaNs%1e9).
 			Format(time.RFC3339Nano)
 		veri["capa_kaynak"] = "sfu-sr-fit"
@@ -1096,6 +1255,13 @@ func yanJSONYaz(p yanParam) {
 		veri["capa_kayma_ppm"] = yuvarla(ppm)
 		p.log.Infow("rawrec çapa fit", "track", p.trackID, "ornek", n,
 			"artik_ms", artik, "kayma_ppm", ppm, "kaynak", p.etiket)
+	}
+	if _, varmi := veri["capture_anchor"]; !varmi && p.ptsUzayi && p.anchorNs != 0 {
+		// Fit için örnek yetmedi ama eşleyici ilk bölümün SR'ından pts 0'ın
+		// saatini biliyor — tek-SR yolundan (ham RTP) daha doğru.
+		veri["capture_anchor"] = time.Unix(p.anchorNs/1e9, p.anchorNs%1e9).
+			Format(time.RFC3339Nano)
+		veri["capa_kaynak"] = "sfu-sr-bolum"
 	}
 	if sr == nil {
 		// Akış boyunca hiç örnekleyemediysek (çok kısa akış) son bir şans.

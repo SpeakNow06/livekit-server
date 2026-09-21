@@ -238,6 +238,11 @@ type ReceiverBase struct {
 	// yazıcı o an canlı olan EN ÜST katmanı takip ediyor.
 	rawVideo     *rawrec.VideoWriter
 	rawVideoOnce sync.Once
+	// rawAudio — ham SES yazıcısı (forwardRTP'de kurulur, orada kapanır).
+	// Burada tutulmasının tek sebebi yayıncı mute sinyalini iletmek
+	// (UpdateTrackInfo → PubMute): ses eşleyicisi susturma sonrası bölüm
+	// eşiğini 2 sn'den 0,2 sn'ye indiriyor (rawrec/saat.go).
+	rawAudio atomic.Pointer[rawrec.Writer]
 
 	isClosed atomic.Bool
 }
@@ -377,6 +382,12 @@ func (r *ReceiverBase) UpdateTrackInfo(ti *livekit.TrackInfo) {
 		buff.SetPaused(paused)
 	}
 	r.bufferMu.Unlock()
+
+	// RAWREC: yayıncı susturdu → ses eşleyicisine sinyal (rawrec/saat.go).
+	// Abone yolunun `PubMute → resyncLocked` karşılığı.
+	if aw := r.rawAudio.Load(); aw != nil {
+		aw.PubMute(paused)
+	}
 
 	r.streamTrackerManager.UpdateTrackInfo(ti)
 
@@ -1046,7 +1057,11 @@ func (r *ReceiverBase) forwardRTP(
 			r.params.TrackID, r.trackInfo, r.params.Codec.ClockRate,
 			r.isRED, buff, r.params.Logger)
 		if rawWriter != nil {
-			defer rawWriter.Close()
+			r.rawAudio.Store(rawWriter)
+			defer func() {
+				r.rawAudio.CompareAndSwap(rawWriter, nil)
+				rawWriter.Close()
+			}()
 		}
 	}
 
@@ -1098,8 +1113,10 @@ func (r *ReceiverBase) forwardRTP(
 		// veriliyor — bugünkü tarayıcı yolunun varsayılanının aynısı, ve
 		// ölçüldü ki bu akışlarda config 13/15/31'in üçü de 20 ms.
 		if rawWriter != nil {
+			// Varış = tampona giriş anı (Arrival), SFU kuyruğunun gecikmesi
+			// eşleyicinin "durmuş saat" ölçüsüne karışmasın (rawrec/saat.go).
 			rawWriter.Write(extPkt.Packet.Payload, extPkt.Packet.Timestamp, 960,
-				extPkt.Packet.SequenceNumber)
+				extPkt.Packet.SequenceNumber, extPkt.Arrival)
 		}
 
 		if extPkt.Packet.PayloadType != uint8(r.params.Codec.PayloadType) {

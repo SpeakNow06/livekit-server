@@ -1204,6 +1204,46 @@ Kullanıcı isteği. `lookupEvery` 200 ms; düğme ile "anahtarı gördüm" aras
 gecikme en çok 200 ms (PLI o kadar erken çıkar). Redis bedeli track başına 5 GET/sn.
 İmaj `v1.11.0-rawrec40` (rawrec39 + bu).
 
+## 31. rawrec/saat.go: SES SAAT EŞLEYİCİ — susturmada duran RTP saati (2026-09-21, kayıt 911)
+
+**Sorun.** `stopMicTrackOnMute` (web+mobil) mute'ta track'i durduruyor; yayıncının ses RTP
+saati (libwebrtc `channel_send.cc` örnek sayacı) DURUYOR, açınca kaldığı yerden sürüyor. Ses
+yazıcısı granülü saf RTP'den kurduğu için her susturma süresi dosyadan siliniyordu: 911 öğrenci A
+8 susturmada 115,0 sn, B 135,7 sn; çapa fit'i (`capaFit`) merdiven veriye doğru uydurup saçma
+çapa veriyordu (50,7 sn). Görüntü etkilenmiyor (damga yakalama duvar saatinden). LiveKit'in abone
+yolu bunu `forwarder.go processSourceSwitch` ("mute valley") ile çözüyor; yazıcımız o düzeltmenin
+önündeydi. Plan/kanıt: speaknow-server `docs/split-recording/SES-SAATI-DURAKLAMASI-PLANI.md`.
+
+**Çözüm (`saat.go`, `rawrec.go`, `receiver_base.go`):**
+- Bölüm modeli: `Δvarış − Δrtp > eşik` → yeni bölüm (durmuş saat); eşik yayıncı mute sinyaliyle
+  0,2 sn (`ReceiverBase.UpdateTrackInfo → Writer.PubMute`, LiveKit `resyncLocked` karşılığı),
+  sinyalsiz 2 sn. DTX/kayıp bölüm açmaz (RTP duvarla yürür). Bayat ilk paket (LiveKit
+  `isPacketTooOld`) düzeltmesi. Varış = `extPkt.Arrival` (`Write` imzasına eklendi).
+- Taban: varış farkından (geçici), bölümün ilk SR'ından (kesin). **Yazma gecikmesi**
+  `SN_RAWREC_YAZMA_GECIKME` (6 sn): paketler akış saatiyle geriden yazılır, taban SR ile
+  kesinleşince kuyruktaki paketler kayar; yazılmış bölüm değişmez (`sr_eksik_sn` yan JSON'da kalır).
+- **Susturma içi SR kuralı** (911 fikstürüyle bulundu): Chrome mute SIRASINDA da SR yolluyor ve
+  RTP damgası duvar saatinden TAHMİN (gerçek sayaç durmuş). SR yalnız VARIŞ ANI bir bölümün paket
+  penceresine (ilk varış … son varış + 0,5 sn) düşüyorsa kullanılır; aradakiler atılır (`sr_atlanan`).
+- Çapa: ilk bölümün 200 ms içinde uyuşan iki SR'ından (bozuk ilk SR'a karşı); `capaFit` PTS
+  uzayında (`sr_gunlugu[].pts`); az örnekte `capa_kaynak: sfu-sr-bolum`.
+- Yan JSON: `bolumler[]` (rtp0, pts0, kaynak, varis_eksik_sn, sr_eksik_sn, kesin, mute_sinyali),
+  `oz_denetim` (duvar_sn, yazilan_sn, acik_sn, ham_acik_sn, durum tutarli|zaman-tutarsiz, bolum,
+  kesin_bolum, sr_atlanan, sr_bozuk, bayat_paket), `yazma_gecikme_sn`, `participant` (webhook
+  `sn:rawrec:track:<sid>` değerine `identity` gelince; Adım 4).
+- Dosya adı `O_EXCL` (`dosyaAcExcl`, ses+görüntü): tam yeniden bağlanmada aynı UUID ile republish
+  önceki parçayı ezmesin (`02_sfu_…`).
+
+**Testler (`audio_replay_test.go`, hepsi geçti):** altın (durmasız akış BAYT BAYT aynı, sha256
+8c97274e…), gerçek 911A fikstürü (tarayıcı kopyasıyla içerik hizalı gerçek konumlar: sonda −0,033 sn,
+en büyük 0,13 sn, %99,6 paket 60 ms içinde, çapa artığı 11,5 ms; eski kod −115,03 sn), 911T kontrol
+(sıfır sapma), sinyalli/sinyalsiz durma, 1 sn sinyalsiz (düzeltilmez, karne "zaman-tutarsız" der),
+DTX+kayıp, kuyruk patlaması (yanlış alarm SR'la geri alınır), SR inceliği, RTP sarması, bozuk ilk SR,
+bayat ilk paket, RED yedeği, dosya adı çakışması. Video altınları değişmedi.
+
+**Bilinen sınır:** sinyalsiz < 2 sn durma düzeltilmez (LiveKit ile aynı); karne açığı gösterir.
+İmaj `v1.11.0-rawrec41`.
+
 ## Rebuild
 ```bash
 cd livekit-server-source            # bu repo, branch speaknow-vp9-simulcast

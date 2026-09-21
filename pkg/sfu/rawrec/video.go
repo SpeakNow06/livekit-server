@@ -1603,9 +1603,12 @@ func (w *VideoWriter) dosyaAç(h *hedef, n int) (*os.File, string, error) {
 	}
 	// "sfu_" öneki — gerekçe rawrec.go `dosyaAç`ta. Uzantı kodekten
 	// (`.ivf` / `.ts`): postprocess kabı uzantıdan seçiyor.
-	yol := filepath.Join(d, fmt.Sprintf("%02d_sfu_%s%s", n, string(w.trackID),
-		w.kodek.Uzanti()))
-	fh, err := os.Create(yol)
+	// YALNIZ YOKSA aç (Adım 1, bkz. rawrec.go dosyaAcExcl): tam yeniden
+	// bağlanmada ekran paylaşımı aynı UUID ile geliyor, önceki parça
+	// ezilmesin.
+	fh, yol, err := dosyaAcExcl(d, func(k int) string {
+		return fmt.Sprintf("%02d_sfu_%s%s", k, string(w.trackID), w.kodek.Uzanti())
+	}, n)
 	if err != nil {
 		return nil, "", err
 	}
