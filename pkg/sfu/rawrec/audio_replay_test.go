@@ -1534,3 +1534,313 @@ func TestSesSRAdimFirefox(t *testing.T) {
 		t.Fatalf("basamak hıçkırıktan bölünmeliydi: sapma %.4f (paket %d) oz=%v", enB, at, oz)
 	}
 }
+
+// ── GELECEK DAMGA (olay 937) ──────────────────────────────────────────────────
+//
+// gelecekSec — gelecekDamgaDizisi seçenekleri. Olay = susturma sonrası açılış;
+// olaylar 400. paketten başlar, her 100 pakette yinelenir.
+type gelecekSec struct {
+	susMs       int           // susturma (ms), olay paketinden önce (mute sinyalli)
+	gelecek     time.Duration // gelecek damga fazlası (Chromium: sayfa yaşı)
+	gelecekFark int           // gelecek damga olay paketinden kaç paket sonra; >0 ise olay paketi DAMGASIZ (react-native / kayıp)
+	ikinciFark  int           // doğru damga olay paketinden kaç paket sonra (0 = yalnız periyodik, her 50 pakette)
+	tekrar      int           // olay sayısı (933: 7)
+	srSonra     bool          // olay paketinden hemen sonra SR (SR geçici bölümü damgadan ÖNCE kesinleştirir)
+}
+
+func gelecekDamgaDizisi(k *sahteSesKaynak, y *yayinci, o gelecekSec) []spaket {
+	y.act = true
+	y.actHer = 50
+	tekrar := o.tekrar
+	if tekrar < 1 {
+		tekrar = 1
+	}
+	olay := map[int]bool{}
+	for r := 0; r < tekrar; r++ {
+		olay[400+r*100] = true
+	}
+	// paket() sonrası çağrılır: o paketin gerçek yakalama damgası
+	dogruYak := func() int64 {
+		return y.wallNs - 20*int64(time.Millisecond) - 40*int64(time.Millisecond) - 3*int64(time.Hour)
+	}
+	var d []spaket
+	for i := 0; i < 400+tekrar*100+200; i++ {
+		if olay[i] {
+			y.dur(o.susMs)
+		}
+		p := y.paket()
+		p.mute = olay[i]
+		switch {
+		case olay[i] && o.gelecekFark == 0:
+			p.yak = dogruYak() + int64(o.gelecek)
+		case olay[i]:
+			p.yak = 0 // açılışın ilk paketi damgasız
+		case o.gelecekFark > 0 && olay[i-o.gelecekFark]:
+			p.yak = dogruYak() + int64(o.gelecek)
+		case o.ikinciFark > 0 && olay[i-o.ikinciFark]:
+			p.yak = dogruYak()
+		}
+		if i%100 == 0 && !olay[i] { // olay paketinde SR olsa damgadan önce o kesinleştirirdi (test damgayı ölçüyor)
+			y.srEkle(k)
+		}
+		if o.srSonra && olay[i] {
+			y.srEkle(k)
+		}
+		d = append(d, p)
+	}
+	return d
+}
+
+func gelecekDamgaDogrula(t *testing.T, ad string, pk []oggPaket, yan map[string]any, dogru []int64, bolum, gelecekSayisi int) {
+	t.Helper()
+	enB, at := enBuyukSapma(t, pk, dogru)
+	oz := ozDenetim(t, yan)
+	bl := bolumler(t, yan)
+	t.Logf("%s: sapma %.4f (paket %d) oz=%v bl=%d red=%v", ad, enB, at, oz, len(bl), yan["act_red_gunlugu"])
+	if len(bl) != bolum {
+		t.Fatalf("%s: %d bölüm bekleniyordu, %d var: %v", ad, bolum, len(bl), bl)
+	}
+	for _, b := range bl[1:] {
+		if b["kesin"] != true {
+			t.Fatalf("%s: bölüm kesinleşmedi: %v", ad, b)
+		}
+	}
+	if gelecekSayisi >= 0 && oz["act_gelecek"].(float64) != float64(gelecekSayisi) {
+		t.Fatalf("%s: act_gelecek %v, %d bekleniyordu (oz=%v)", ad, oz["act_gelecek"], gelecekSayisi, oz)
+	}
+	if enB > 0.002 || oz["durum"] != "tutarli" {
+		t.Fatalf("%s: sapma %.4f sn / oz=%v", ad, enB, oz)
+	}
+}
+
+// TestSesYakalamaSaatiGelecekDamga — 937 öğretmen bölüm 1: 0,26 sn susturma,
+// ilk paket +1240 sn, 20 ms sonra doğru damga. Eski kod: 1240 sn sessizlik
+// eklerdi (oz "zaman-tutarsiz"). Yeni: damga reddedilir, bölüm varışla açılıp
+// ikinci damgayla kesinleşir, sapma 0; reddedilen damga yan JSON'a yazılır.
+func TestSesYakalamaSaatiGelecekDamga(t *testing.T) {
+	k := &sahteSesKaynak{}
+	y := yeniYayinci(t0(), 500_000)
+	d := gelecekDamgaDizisi(k, y, gelecekSec{susMs: 260, gelecek: 1240 * time.Second, ikinciFark: 1})
+	pk, yan := sesKos(t, k, d)
+	gelecekDamgaDogrula(t, "gelecek damga 0,26 sn / +1240 sn", pk, yan, y.dogru, 2, 1)
+	bl := bolumler(t, yan)
+	if bl[1]["kaynak"] != "mute+varis+act" {
+		t.Fatalf("bölüm varışla açılıp damgayla kesinleşmeliydi: %v", bl[1])
+	}
+	red, _ := yan["act_red_gunlugu"].([]any)
+	if len(red) != 1 {
+		t.Fatalf("reddedilen damga günlüğe yazılmalıydı: %v", yan["act_red_gunlugu"])
+	}
+	if g := red[0].(map[string]any)["gelecek_ms"].(float64); g < 1239_000 || g > 1241_000 {
+		t.Fatalf("gelecek_ms ≈ 1240000 bekleniyordu: %v", g)
+	}
+}
+
+// TestSesYakalamaSaatiGelecekDamgaUzunMute — 937 bölüm 2 / 933 modeli: 2 sn
+// susturma, ilk paket +500 sn; doğru damga 3 paket sonra (60 ms).
+func TestSesYakalamaSaatiGelecekDamgaUzunMute(t *testing.T) {
+	k := &sahteSesKaynak{}
+	y := yeniYayinci(t0(), 500_000)
+	d := gelecekDamgaDizisi(k, y, gelecekSec{susMs: 2060, gelecek: 500 * time.Second, ikinciFark: 3})
+	pk, yan := sesKos(t, k, d)
+	gelecekDamgaDogrula(t, "gelecek damga 2 sn / +500 sn", pk, yan, y.dogru, 2, 1)
+}
+
+// TestSesYakalamaSaatiGelecekDamgaSeyrek — doğru damga ancak periyodik damgayla
+// (50 paket = 1 sn sonra) gelir; geçici bölüm o damgayla kesinleşir.
+func TestSesYakalamaSaatiGelecekDamgaSeyrek(t *testing.T) {
+	k := &sahteSesKaynak{}
+	y := yeniYayinci(t0(), 500_000)
+	d := gelecekDamgaDizisi(k, y, gelecekSec{susMs: 260, gelecek: 1240 * time.Second})
+	pk, yan := sesKos(t, k, d)
+	gelecekDamgaDogrula(t, "gelecek damga seyrek", pk, yan, y.dogru, 2, 1)
+}
+
+// TestSesYakalamaSaatiGelecekDamgaTekrar — 933 Öğrenci G: 7 açılış, 7'sinde de
+// ilk paket gelecekte (sayfa yaşı her seferinde büyür: 196 → 496 sn).
+func TestSesYakalamaSaatiGelecekDamgaTekrar(t *testing.T) {
+	k := &sahteSesKaynak{}
+	y := yeniYayinci(t0(), 500_000)
+	d := gelecekDamgaDizisi(k, y, gelecekSec{susMs: 900, gelecek: 196 * time.Second, ikinciFark: 1, tekrar: 7})
+	n := 0
+	for i := range d {
+		if d[i].mute {
+			d[i].yak += int64(n) * 50 * int64(time.Second)
+			n++
+		}
+	}
+	pk, yan := sesKos(t, k, d)
+	gelecekDamgaDogrula(t, "gelecek damga ×7", pk, yan, y.dogru, 8, 7)
+}
+
+// TestSesYakalamaSaatiGelecekDamgaKucukSayfaYasi — sayfa yeni yüklenmiş
+// (2 sn): fark eşiğin (500 ms) üstünde, yine reddedilmeli.
+func TestSesYakalamaSaatiGelecekDamgaKucukSayfaYasi(t *testing.T) {
+	k := &sahteSesKaynak{}
+	y := yeniYayinci(t0(), 500_000)
+	d := gelecekDamgaDizisi(k, y, gelecekSec{susMs: 260, gelecek: 2 * time.Second, ikinciFark: 1})
+	pk, yan := sesKos(t, k, d)
+	gelecekDamgaDogrula(t, "gelecek damga +2 sn", pk, yan, y.dogru, 2, 1)
+}
+
+// TestSesYakalamaSaatiGercekSusturmaReddedilmez — kural gerçek susturmayı
+// reddetmemeli: damga doğru. act_gelecek 0 ve bölüm damgayla ("act") açılır.
+func TestSesYakalamaSaatiGercekSusturmaReddedilmez(t *testing.T) {
+	k := &sahteSesKaynak{}
+	y := yeniYayinci(t0(), 500_000)
+	d := gelecekDamgaDizisi(k, y, gelecekSec{susMs: 3000, ikinciFark: 1})
+	pk, yan := sesKos(t, k, d)
+	gelecekDamgaDogrula(t, "gerçek susturma", pk, yan, y.dogru, 2, 0)
+	bl := bolumler(t, yan)
+	if bl[1]["kaynak"] != "act" {
+		t.Fatalf("gerçek susturma damgayla açılmalıydı: %v", bl[1])
+	}
+}
+
+// TestSesYakalamaSaatiGelecekDamgaGeciciBolumSonrasi — DENETİM KÖR NOKTASI:
+// açılışın ilk paketi DAMGASIZ (react-native deseni / ilk paket kaybı) → bölüm
+// varış yoluyla geçici açılır; ikinci paket gelecek damgalı (+2,2 sn, susturma
+// 2,0 sn). rawrec54 taslağı `kayma − eksikTop` ile duraklamayı iki kez düşüp
+// (2,2 − 2,0 = 0,2 < 0,5) damgayı KABUL ediyordu: 2,2 sn hayalet boşluk.
+// Δdamga − Δvarış = 2,2 sn → reddedilir; doğru damga (3. paket) kesinleştirir.
+func TestSesYakalamaSaatiGelecekDamgaGeciciBolumSonrasi(t *testing.T) {
+	k := &sahteSesKaynak{}
+	y := yeniYayinci(t0(), 500_000)
+	d := gelecekDamgaDizisi(k, y, gelecekSec{susMs: 2000, gelecek: 2200 * time.Millisecond, gelecekFark: 1, ikinciFark: 2})
+	pk, yan := sesKos(t, k, d)
+	gelecekDamgaDogrula(t, "geçici bölüm sonrası gelecek damga 2,0/2,2 sn", pk, yan, y.dogru, 2, 1)
+}
+
+// Aynısı, uzun susturma: 600 sn susturma, ikinci paket +600,3 sn.
+func TestSesYakalamaSaatiGelecekDamgaGeciciBolumSonrasiUzun(t *testing.T) {
+	k := &sahteSesKaynak{}
+	y := yeniYayinci(t0(), 500_000)
+	d := gelecekDamgaDizisi(k, y, gelecekSec{susMs: 600_000, gelecek: 600_300 * time.Millisecond, gelecekFark: 1, ikinciFark: 2})
+	pk, yan := sesKos(t, k, d)
+	gelecekDamgaDogrula(t, "geçici bölüm sonrası gelecek damga 600/600,3 sn", pk, yan, y.dogru, 2, 1)
+}
+
+// TestSesYakalamaSaatiGelecekDamgaRN938 — 938 Öğrenci D (react-native) deseni:
+// susturma YOK, akış yeni başlamış; 5. paketten itibaren varış 213 ms gecikir
+// (patlamalı RN varışı) ve 5. paketin damgası +14 sn ileride. Kural: Δdamga −
+// Δvarış ≈ 13,8 sn → reddedilir; bölüm açılmaz, sapma 0.
+func TestSesYakalamaSaatiGelecekDamgaRN938(t *testing.T) {
+	k := &sahteSesKaynak{}
+	y := yeniYayinci(t0(), 500_000)
+	y.act = true
+	y.actHer = 50
+	d := dizi(k, y, 1000, 100, nil)
+	for i := 4; i < len(d); i++ {
+		d[i].gelis = d[i].gelis.Add(213 * time.Millisecond)
+	}
+	d[4].yak = t0().UnixNano() + 4*20*int64(time.Millisecond) - 40*int64(time.Millisecond) - 3*int64(time.Hour) + 14*int64(time.Second)
+	pk, yan := sesKos(t, k, d)
+	gelecekDamgaDogrula(t, "RN 938 modeli", pk, yan, y.dogru, 1, 1)
+}
+
+// TestSesYakalamaSaatiReferansGecVarmis — referans damgalı paket (350) ve
+// ardındaki paketler 600 ms geç varmış (ağ patlaması); sonra gerçek 3 sn
+// susturma ve doğru damga. Kural yanlış reddedebilir (Δvarış referanstan beri
+// 600 ms kısa) ama sonuç kendini toparlamalı: geçici bölüm SR/damga ile
+// kesinleşir, sapma küçük, gerekirse referans yeniden tabanlanır.
+func TestSesYakalamaSaatiReferansGecVarmis(t *testing.T) {
+	k := &sahteSesKaynak{}
+	y := yeniYayinci(t0(), 500_000)
+	d := gelecekDamgaDizisi(k, y, gelecekSec{susMs: 3000, ikinciFark: 1})
+	for i := 350; i < 400; i++ {
+		d[i].gelis = d[i].gelis.Add(600 * time.Millisecond)
+	}
+	pk, yan := sesKos(t, k, d)
+	gelecekDamgaDogrula(t, "referans geç varmış", pk, yan, y.dogru, 2, -1)
+}
+
+// TestSesYakalamaSaatiIlkDamgaGelecek — dosyanın İLK damgası gelecekte
+// (sonYak == 0 iken referans olur). Bölüm açılmamalı; ikinci damga (50. paket)
+// negatif kaymayla geçer ve referans düzelir; sapma 0.
+func TestSesYakalamaSaatiIlkDamgaGelecek(t *testing.T) {
+	k := &sahteSesKaynak{}
+	y := yeniYayinci(t0(), 500_000)
+	y.act = true
+	y.actHer = 50
+	d := dizi(k, y, 600, 100, nil)
+	d[0].yak += 900 * int64(time.Second)
+	pk, yan := sesKos(t, k, d)
+	gelecekDamgaDogrula(t, "ilk damga gelecek", pk, yan, y.dogru, 1, 0)
+}
+
+// TestSesYakalamaSaatiSRKesinlestirirSonraDamga — açılışın ilk paketi damgasız,
+// SR hemen ardından gelip geçici bölümü kesinleştirir, doğru damga ondan SONRA
+// gelir: damga kesin bölümde ~0 kaymayla geçmeli, çift düzeltme olmamalı.
+func TestSesYakalamaSaatiSRKesinlestirirSonraDamga(t *testing.T) {
+	k := &sahteSesKaynak{}
+	y := yeniYayinci(t0(), 500_000)
+	d := gelecekDamgaDizisi(k, y, gelecekSec{susMs: 3000, gelecekFark: 1, ikinciFark: 2, srSonra: true})
+	pk, yan := sesKos(t, k, d)
+	gelecekDamgaDogrula(t, "SR önce, damga sonra", pk, yan, y.dogru, 2, 0)
+}
+
+// TestSesYakalamaSaatiSaatSicramasi — yayıncı saati +2 sn SIÇRAR (NTP
+// düzeltmesi), duraklama yok. Damgalar reddedilir, 5. reddedişte referans
+// yeniden tabanlanır, act yolu sürer; tek bölüm, sapma 0.
+func TestSesYakalamaSaatiSaatSicramasi(t *testing.T) {
+	k := &sahteSesKaynak{}
+	y := yeniYayinci(t0(), 500_000)
+	y.act = true
+	y.actHer = 50
+	d := dizi(k, y, 1200, 100, nil)
+	for i := 300; i < len(d); i++ {
+		if d[i].yak != 0 {
+			d[i].yak += 2 * int64(time.Second)
+		}
+	}
+	pk, yan := sesKos(t, k, d)
+	enB, at := enBuyukSapma(t, pk, y.dogru)
+	oz := ozDenetim(t, yan)
+	bl := bolumler(t, yan)
+	t.Logf("saat sıçraması: sapma %.4f (paket %d) oz=%v bl=%d", enB, at, oz, len(bl))
+	if len(bl) != 1 || oz["act_gelecek"].(float64) < 1 || oz["act_yeniden_taban"].(float64) != 1 {
+		t.Fatalf("sıçrama tek bölümde emilmeli ve referans bir kez yeniden tabanlanmalıydı: oz=%v bl=%v", oz, bl)
+	}
+	if enB > 0.002 || oz["durum"] != "tutarli" {
+		t.Fatalf("sapma %.4f sn / oz=%v", enB, oz)
+	}
+}
+
+// TestSesYakalamaSaatiIlkDamgaGelecekSonraMute — DENETİM T1: dosyanın ilk damgası
+// gelecekte (+900 sn) ve bir sonraki periyodik damgadan ÖNCE 3 sn susturma; açılış
+// paketleri doğru damgalı. Koruma olmadan 21. paket geçici bölümü −897 sn kaydırır
+// (pts negatif, granül taşar). Koruma: damga referansın 10 sn+ gerisinde → referans
+// yeniden tabanlanır, bölüm varış/SR ile kesinleşir, sapma 0.
+func TestSesYakalamaSaatiIlkDamgaGelecekSonraMute(t *testing.T) {
+	k := &sahteSesKaynak{}
+	y := yeniYayinci(t0(), 500_000)
+	y.act = true
+	y.actHer = 50
+	d := dizi(k, y, 700, 100, func(i int, y *yayinci) bool {
+		if i == 20 {
+			y.dur(3000)
+			return true
+		}
+		return false
+	})
+	d[0].yak += 900 * int64(time.Second)
+	for i := 20; i <= 22; i++ { // açılış paketleri doğru damgalı
+		d[i].yak = t0().UnixNano() + int64(i)*20*int64(time.Millisecond) + 3*int64(time.Second) - 40*int64(time.Millisecond) - 3*int64(time.Hour)
+	}
+	pk, yan := sesKos(t, k, d)
+	enB, at := enBuyukSapma(t, pk, y.dogru)
+	oz := ozDenetim(t, yan)
+	bl := bolumler(t, yan)
+	t.Logf("ilk damga gelecek + mute: sapma %.4f (paket %d) oz=%v bl=%v", enB, at, oz, bl)
+	if len(bl) != 2 || bl[1]["kesin"] != true || oz["act_supheli"].(float64) < 1 {
+		t.Fatalf("bozuk referans yeniden tabanlanmalı, bölüm kesinleşmeliydi: oz=%v bl=%v", oz, bl)
+	}
+	for _, b := range bl {
+		if b["pts0"].(float64) < 0 {
+			t.Fatalf("negatif pts0: %v", b)
+		}
+	}
+	if enB > 0.002 || oz["durum"] != "tutarli" {
+		t.Fatalf("sapma %.4f sn / oz=%v", enB, oz)
+	}
+}

@@ -1060,6 +1060,9 @@ func (w *Writer) yanJSON(yol string, ilkAn time.Time, kare int, ilkRTP, sonRel u
 	ek := katilimciEk(h)
 	ek["bolumler"] = saat.bolumler
 	ek["oz_denetim"] = saat.ozDenetim()
+	if len(saat.actRed) > 0 {
+		ek["act_red_gunlugu"] = saat.actRed // reddedilen gelecek damgalar (rawrec55)
+	}
 	if len(saat.actG.orn) > 0 {
 		ek["act_gunlugu"] = saat.actG.orn // pts@hz ↔ yayıncı yakalama anı (rawrec50)
 	}

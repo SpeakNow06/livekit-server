@@ -155,14 +155,20 @@ type sesSaat struct {
 	// Firefox libwebrtc'ye yakalama zamanı vermiyor (uzantı pazarlansa da
 	// pakete girmez) → orada varış/SR yolu sürer. Mobil (react-native)
 	// zaten durmuyor.
-	sonYak      int64     // son (yedek olmayan) paketin yakalanma anı, 0 = yok
-	sonYakRTP   uint32    // o paketin RTP'si
-	sonYakPts   int64     // o paketin dosyadaki yeri: yakalama saatiyle yer = sonYakPts + Δyakalama
-	sonYakBolum int       // o paketin bölümü (SR kayması olursa sonYakPts de kayar; referans bölümden önceyse geçici bölüm kesinleşir)
-	actPaket    int       // yakalama saatli paket sayısı
-	actG        actGunluk // damga günlüğü (pts ↔ yakalama anı), yan JSON `act_gunlugu`
-	actBayat    int       // bayat yakalama saati: varış "durdu" dedi, damga onaylamadı (rawrec49, kayıt 920)
-	paketSayisi int       // yedek dışı toplam paket
+	sonYak       int64         // son (yedek olmayan) paketin yakalanma anı, 0 = yok
+	sonYakRTP    uint32        // o paketin RTP'si
+	sonYakPts    int64         // o paketin dosyadaki yeri: yakalama saatiyle yer = sonYakPts + Δyakalama
+	sonYakBolum  int           // o paketin bölümü (SR kayması olursa sonYakPts de kayar; referans bölümden önceyse geçici bölüm kesinleşir)
+	actPaket     int           // yakalama saatli paket sayısı
+	actG         actGunluk     // damga günlüğü (pts ↔ yakalama anı), yan JSON `act_gunlugu`
+	actBayat     int           // bayat yakalama saati: varış "durdu" dedi, damga onaylamadı (rawrec49, kayıt 920)
+	sonYakGelis  time.Time     // referans damgalı paketin VARIŞ anı (gelecek damga kuralı, olay 937)
+	actGelecek   int           // gelecek damga: damga, varışın görmediği bir duraklama iddia etti → reddedildi
+	actRedArd    int           // art arda reddedilen gelecek damga; actRedTaban'da referans yeniden tabanlanır
+	actYeniTaban int           // yayıncı saati sıçradı sayılıp referansın yeniden tabanlandığı sayı
+	actRed       []actRedOrnek // reddedilen gelecek damgalar (ilk actRedGunlukUst tanesi), yan JSON `act_red_gunlugu`
+	actSupheli   int           // referansın çok gerisinde kalan damga → referans bozuk sayılıp yeniden tabanlandı
+	paketSayisi  int           // yedek dışı toplam paket
 }
 
 // actEsik — damgayla ölçülen fark bunu aşarsa bölüm açılır (ya da geçici
@@ -173,6 +179,60 @@ type sesSaat struct {
 // +20 ms basamak gösterdi, 100 ms eşiği bunu görmüyordu. Firefox'ta (923)
 // aynı basamak var ama damga yok → orada yakalanamıyor.
 const actEsik = 10 * time.Millisecond
+
+// actGelecekEsik — GELECEK DAMGA kuralı (olay 937; kayıtlar 932/933/937 bozuldu).
+// Chromium'un breakout box'ı (MediaStreamTrackProcessor → Worker → Generator)
+// zincir her kurulduğunda ilk 1-3 parçayı SAYFA YAŞI kadar ileri damgalıyor
+// (sayfa-göreli damga, Worker realm'inde okunuyor); libwebrtc ACM ilk 10 ms
+// çerçevenin damgasını bütün pakete yapıştırdığı için açılışın İLK paketi
+// dakikalarca "gelecekte yakalanmış" görünüyor (937: +1240 sn, 933: +196-496 sn).
+// Yazıcı buna güvenip dosyaya o kadar sessizlik ekliyordu.
+//
+// Ölçüt: damganın referanstan beri iddia ettiği ilerleme (kayma) ile varışın
+// aynı aralıkta gördüğü duraklama (Δvarış − Δrtp) karşılaştırılır. Gerçek
+// susturmada ikisi eşit (± ağ titremesi); ağ kesintisinde ikisi de ~0; gelecek
+// damgada kayma = susturma + sayfa yaşı. Fark bu eşiği aşarsa damga reddedilir,
+// referans GÜNCELLENMEZ, paket varış yoluna düşer; 20-60 ms sonra gelen doğru
+// damga geçici bölümü kesinleştirir (bayat damga kuralının aynası, rawrec49).
+// 500 ms: titremenin çok üstü, sayfa yaşının çok altı (zincir sayfa yüklendikten
+// en az birkaç saniye sonra kurulabilir).
+const actGelecekEsik = 500 * time.Millisecond
+
+// actRedTaban — art arda bu kadar damga "gelecek" diye reddedilirse yayıncının
+// saati SIÇRAMIŞ sayılır (NTP düzeltmesi vb.) ve referans bu paketin varış
+// yoluyla bulunan yerine yeniden tabanlanır; aksi hâlde yakalama saati yolu
+// kaydın sonuna kadar ölü kalırdı. Gelecek damga olayı tek pakettir: gönderici
+// (libwebrtc AbsoluteCaptureTimeSender) enterpolasyon hatası > 1 ms görünce
+// doğru damgayı hemen yollar, sayaç sıfırlanır.
+const actRedTaban = 5
+
+// actGeriEsik — damga, referansa göre bundan fazla GERİDEYSE referans bozuktur
+// (dosyanın ilk damgası gelecekteydi ve referans oldu; bir sonraki damgadan
+// önce susturma gelirse geçici bölüm bu damgayla dakikalarca GERİ kayar, pts
+// negatife düşer, granül taşar — denetim T1). Damga uygulanmaz, referans bu
+// pakete taşınır (`act_supheli`). Meşru geri düzeltmeler (bayat ilk paket
+// ≤ 500 ms, titreme) bunun çok altında.
+const actGeriEsik = 10 * time.Second
+
+// actRedOrnek — reddedilen bir damganın kaydı: paketin RTP'ye göre yeri, ham
+// damga, damganın duvar saatini ne kadar aştığı ve RTP'ye göre iddia ettiği
+// kayma. Yayın sonrası izleme için (denetim önerisi).
+type actRedOrnek struct {
+	Pts       int64 `json:"pts"`
+	YakNs     int64 `json:"yak_ns"`
+	GelecekMs int64 `json:"gelecek_ms"`
+	KaymaMs   int64 `json:"kayma_ms"`
+}
+
+const actRedGunlukUst = 20
+
+func (s *sesSaat) actRedKaydet(pts, yakNs int64, gelecek time.Duration, kayma int64) {
+	if len(s.actRed) >= actRedGunlukUst {
+		return
+	}
+	s.actRed = append(s.actRed, actRedOrnek{Pts: pts, YakNs: yakNs,
+		GelecekMs: gelecek.Milliseconds(), KaymaMs: kayma * 1000 / s.hz})
+}
 
 func yeniSesSaat(hz uint32) *sesSaat {
 	return &sesSaat{hz: int64(hz)}
@@ -212,6 +272,7 @@ func (s *sesSaat) yerlestir(rtp uint32, gelis time.Time, seq uint16, yedek bool,
 		s.paketSayisi = 1
 		if yakNs > 0 {
 			s.actPaket, s.sonYak, s.sonYakRTP, s.sonYakPts, s.sonYakBolum = 1, yakNs, rtp, 0, 0
+			s.sonYakGelis = gelis
 			s.actG.ekle(0, yakNs)
 		}
 		return 0, nil, nil, 0
@@ -239,10 +300,36 @@ func (s *sesSaat) yerlestir(rtp uint32, gelis time.Time, seq uint16, yedek bool,
 	actVar := yakNs > 0 && s.sonYak > 0
 	var dogru, kayma int64
 	var kaymaBolum *sesBolum
+	yeniTaban := false
 	if actVar {
 		dogru = s.sonYakPts + s.sureOrnek(time.Duration(yakNs-s.sonYak))
 		kayma = dogru - pts
-		if eksik > esik && kayma <= s.sureOrnek(actEsik) {
+		// Damganın referanstan beri İLERLEMESİ ile duvar saatinin (varış)
+		// ilerlemesi DOĞRUDAN karşılaştırılır: yakalama, duvar saatinden hızlı
+		// akamaz. Aradaki bölümler hesaba girmez — rawrec54 taslağı `kayma`
+		// üzerinden karşılaştırıyordu ve referans önceki bölümdeyken varış
+		// yoluyla açılmış geçici bölümün boşluğunu iki kez düşüyordu (denetim
+		// bulgusu: açılışın ilk paketi damgasız/kayıp, ikincisi gelecek damgalı
+		// → 2,2 sn hayalet boşluk; rawrec55). Referans damgalı paket en çok ~1 sn
+		// geride (Chrome damgayı 1/sn yollar), titreme yalnız iki uç paketinki.
+		gelecek := time.Duration(yakNs-s.sonYak) - gelis.Sub(s.sonYakGelis)
+		if kayma > s.sureOrnek(actEsik) && !s.sonYakGelis.IsZero() && gelecek > actGelecekEsik {
+			// GELECEK DAMGA (olay 937): damga, duvar saatinin geçmediği bir süreyi
+			// "yakalandı" diyor → yakalama varıştan SONRA olamaz. Damga güvenilmez:
+			// varış yoluna düş, referansı KORU (bkz. actGelecekEsik).
+			actVar = false
+			s.actGelecek++
+			s.actRedArd++
+			s.actRedKaydet(pts, yakNs, gelecek, kayma)
+			if s.actRedArd >= actRedTaban {
+				yeniTaban = true
+			}
+		} else if kayma < -s.sureOrnek(actGeriEsik) {
+			// REFERANS BOZUK (bkz. actGeriEsik): damga uygulanmaz, referans buraya taşınır.
+			actVar = false
+			s.actSupheli++
+			yeniTaban = true
+		} else if eksik > esik && kayma <= s.sureOrnek(actEsik) {
 			// BAYAT YAKALAMA SAATİ (rawrec49, kayıt 920): varış "akış durdu"
 			// diyor, bu paketin damgası "hiç durmadı" diyor. Chrome'da
 			// susturma öncesi yarım kalan 10 ms'lik çerçevenin damgası
@@ -263,6 +350,13 @@ func (s *sesSaat) yerlestir(rtp uint32, gelis time.Time, seq uint16, yedek bool,
 			// referans damga bu bölümden ÖNCE → ölçülen fark bölümün varışla
 			// kurulan tabanının hatası (bayat/erken ilk paket, kuyruk
 			// patlaması, bayat damga). Taban kayar, kuyruk yazıcıda kayar.
+			if b.Sira > 0 {
+				// MONOTON KORUMA: bölüm tabanı önceki bölümün son paketinin
+				// altına inemez (negatif/örtüşen pts hiç oluşmasın; denetim T1).
+				if alt := s.bolumler[b.Sira-1].sonPts + 1; b.Pts0+kayma < alt {
+					kayma = alt - b.Pts0
+				}
+			}
 			if kayma != 0 {
 				b.Pts0 += kayma
 				b.sonPts += kayma
@@ -297,6 +391,8 @@ func (s *sesSaat) yerlestir(rtp uint32, gelis time.Time, seq uint16, yedek bool,
 		p, y := s.bitir(b, rtp, gelis, seq, pts, dRtp, yeni)
 		s.hicKaydet(eksik, p, rtp, gelis, yeni)
 		s.sonYak, s.sonYakRTP, s.sonYakPts, s.sonYakBolum = yakNs, rtp, p, b.Sira
+		s.sonYakGelis = gelis
+		s.actRedArd = 0
 		s.actG.ekle(p, yakNs)
 		return p, y, kaymaBolum, kayma
 	}
@@ -334,10 +430,17 @@ func (s *sesSaat) yerlestir(rtp uint32, gelis time.Time, seq uint16, yedek bool,
 	}
 	p, y := s.bitir(b, rtp, gelis, seq, pts, dRtp, yeni)
 	s.hicKaydet(eksik, p, rtp, gelis, yeni)
-	if yakNs > 0 && s.sonYak == 0 {
-		// İlk damga: referans (bayat şüphelisi buraya düşmez, referansı korur).
+	if yakNs > 0 && (s.sonYak == 0 || yeniTaban) {
+		// İlk damga: referans (bayat/gelecek şüphelisi buraya düşmez, referansı
+		// korur). yeniTaban: yayıncı saati sıçradı, referans varış yoluyla
+		// bulunan yere yeniden kurulur — dosya kaymaz, act yolu yeniden çalışır.
 		s.sonYak, s.sonYakRTP, s.sonYakPts, s.sonYakBolum = yakNs, rtp, p, s.simdiki().Sira
+		s.sonYakGelis = gelis
 		s.actG.ekle(p, yakNs)
+		if yeniTaban {
+			s.actYeniTaban++
+			s.actRedArd = 0
+		}
 	}
 	return p, y, nil, 0
 }
@@ -620,15 +723,18 @@ func (s *sesSaat) srGeldi(sr *livekit.RTCPSenderReportState) (*sesBolum, int64) 
 // düzeltmenin ne kadar iş yaptığını gösterir.
 func (s *sesSaat) ozDenetim() map[string]any {
 	r := map[string]any{
-		"bolum":       len(s.bolumler),
-		"kesin_bolum": 0,
-		"sr_bozuk":    s.srBozuk,
-		"sr_atlanan":  s.srAtlanan,
-		"bayat_paket": s.bayat,
-		"erken_paket": s.erken,
-		"act_bayat":   s.actBayat,
-		"sr_adim":     s.srAdim,
-		"act_paket":   s.actPaket,
+		"bolum":             len(s.bolumler),
+		"kesin_bolum":       0,
+		"sr_bozuk":          s.srBozuk,
+		"sr_atlanan":        s.srAtlanan,
+		"bayat_paket":       s.bayat,
+		"erken_paket":       s.erken,
+		"act_bayat":         s.actBayat,
+		"act_gelecek":       s.actGelecek, // reddedilen gelecek damga (olay 937)
+		"act_supheli":       s.actSupheli, // referansın çok gerisinde damga → referans yeniden tabanlandı
+		"act_yeniden_taban": s.actYeniTaban,
+		"sr_adim":           s.srAdim,
+		"act_paket":         s.actPaket,
 	}
 	if s.paketSayisi > 0 {
 		r["act_oran"] = yuvarla(float64(s.actPaket) / float64(s.paketSayisi))

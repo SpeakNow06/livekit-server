@@ -1406,6 +1406,57 @@ ilkini çıkarmak yetmedi, altısı çıkınca dosya sorunsuz oynadı. Tarayıc�
   tarayıcı yolu için aynı kural TS düzeyinde (zehirli kare + kayıp IDR'ye kadar).
 İmaj `v1.11.0-rawrec53`, iki sunucuda.
 
+## 42. rawrec55 — GELECEK YAKALAMA SAATİ reddi + saat sıçramasında yeniden taban (2026-09-27, kayıtlar 932/933/937)
+Chromium'un breakout box'ı (MediaStreamTrackProcessor → Worker → Generator; sınıfın
+denoise zinciri) her kurulumda ilk 1-3 parçayı SAYFA YAŞI kadar ileri damgalıyor:
+MSTP parçayı sayfanın `performance.timeOrigin`ine göreli damgalıyor, readable
+Worker'a aktarılınca taban Worker'ın kökenine dönüyor (`TransferSource →
+UpdateRealmInfo`) ama aktarımdan önce kuyruğa girmiş parçalar sayfa-göreli
+kalıyor; Generator sink'i onları Worker kökeniyle okuyor
+(`kBreakoutBoxExposePageRelativeAudioCaptureTime`, varsayılan açık). libwebrtc ACM
+ilk 10 ms çerçevenin damgasını bütün pakete yapıştırdığı için açılışın İLK
+paketi `abs-capture-time`'da dakikalarca ileride: 937 öğretmen +1240 sn (sayfa
+21:00:24'te yüklenmişti), 933 öğrenci 7/7 açılışta +196…+496 sn. Yazıcı buna
+güvenip dosyaya o kadar sessizlik ekledi; öz denetim yakaladı ama postprocess
+kuralı dosyayı yine seçti (932/933/937 bozuk). Gerçek sitede Chrome 153 ile
+yeniden üretildi (doğal yarış 8/8, RTP alıcı 3/5, gerçek mikrofon 1/3).
+- `saat.go` `yerlestir`: damganın referanstan beri İLERLEMESİ (Δyak) ile duvar
+  saatinin ilerlemesi (Δvarış, referans paketin varışı `sonYakGelis`'ten)
+  DOĞRUDAN karşılaştırılır; Δyak − Δvarış > `actGelecekEsik` (500 ms) ise damga
+  reddedilir, referans KORUNUR, paket varış yoluna düşer; 20-60 ms sonra gelen
+  doğru damga geçici bölümü kesinleştirir (bayat damga kuralının aynası, §37).
+  rawrec54 taslağı `kayma` üzerinden karşılaştırıyordu; bağımsız denetim kör
+  noktayı buldu: referans önceki bölümdeyken araya varış yoluyla açılmış geçici
+  bölüm girerse duraklama iki kez düşülüyordu (açılışın ilk paketi damgasız /
+  kayıp, ikincisi gelecek damgalı → 2,2 sn hayalet boşluk). Sayaç
+  `act_gelecek`; reddedilen damgalar yan JSON `act_red_gunlugu` (ilk 20: pts,
+  yak_ns, gelecek_ms, kayma_ms).
+- Yayıncı saati SIÇRARSA (NTP düzeltmesi) her damga reddedilirdi ve act yolu
+  ölürdü: `actRedTaban` (5) ardışık redde referans bu paketin varış yoluyla bulunan
+  yerine yeniden tabanlanır (`act_yeniden_taban`), dosya kaymaz.
+- Testler (`audio_replay_test.go`, `gelecekDamgaDizisi` + `gelecekSec`): 937
+  modeli (0,26 sn susturma +1240 sn), 2 sn susturma +500 sn, seyrek damga,
+  933'ün 7 tekrarı, 2 sn'lik sayfa yaşı, gerçek susturmanın reddedilmemesi,
+  denetim kör noktası (ilk paket damgasız + 2,0/2,2 sn ve 600/600,3 sn), 938
+  react-native deseni (susturmasız, 5. paket +14 sn), referansın 600 ms geç
+  varışı (yanlış ret, kendini toparlar), dosyanın ilk damgası gelecek, SR'nin
+  damgadan önce kesinleştirmesi, +2 sn saat sıçraması → hepsinde sapma 0,0000,
+  öz denetim "tutarlı". Altın değerler değişmedi (53 test).
+- Referans bozuksa (dosyanın ilk damgası gelecekteydi) ve bir sonraki damgadan
+  önce susturma gelirse geçici bölüm dakikalarca GERİ kayardı (denetim T1):
+  damga referansın `actGeriEsik` (10 sn) gerisindeyse uygulanmaz, referans o
+  pakete taşınır (`act_supheli`); kesinleştirmede bölüm tabanı önceki bölümün
+  son paketinin altına inemez (monoton koruma). Test
+  `TestSesYakalamaSaatiIlkDamgaGelecekSonraMute`.
+- İstemci tarafı (speaknow-server, ?v=23): denoise worker'ı `kur` mesajındaki
+  sayfa `performance.timeOrigin`i ile gelecek damgalı parçayı KESİN olarak
+  yeniden tabanlıyor (sayfa-göreli − (worker kökeni − sayfa kökeni)); kelepçe
+  (şimdiye çekme) yalnız köken bilinmiyorsa. Postprocess `_tarayici_kisa_mi`
+  zaman-tutarsız SFU dosyasında tarayıcı kopyasını `saglik.yazilan_sn` (ilk
+  yazılan paket → son paket, duvar saati) ile ölçer; senkron ölçümünde tepe,
+  bölüm sınırları arası parçaların kendi ortancasına göre.
+İmaj `v1.11.0-rawrec55` (rawrec54 yayına alınmadı).
+
 ## Rebuild
 ```bash
 cd livekit-server-source            # bu repo, branch speaknow-vp9-simulcast
