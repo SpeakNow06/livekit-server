@@ -108,6 +108,8 @@ type sesBolum struct {
 	sonPts     int64
 	sonGelisNs int64 // bölümün son paketinin varışı (SR'ın hangi bölüme ait olduğu bununla)
 	yazildi    bool  // bölümden en az bir paket dosyaya yazıldı (artık taban değişemez)
+	actGecici  bool  // damgayla açıldı, adımı küçük: bir sonraki damga doğrulayana kadar GEÇİCİ (rawrec56)
+	actDuz     int   // geçici act bölümünde yapılan taban düzeltmesi sayısı (rawrec56)
 }
 
 // srPencereTolerans — SR, bölümün son paketinden en çok bu kadar sonra
@@ -169,6 +171,11 @@ type sesSaat struct {
 	actRed       []actRedOrnek // reddedilen gelecek damgalar (ilk actRedGunlukUst tanesi), yan JSON `act_red_gunlugu`
 	actSupheli   int           // referansın çok gerisinde kalan damga → referans bozuk sayılıp yeniden tabanlandı
 	paketSayisi  int           // yedek dışı toplam paket
+	actGeriArd   int           // art arda uygulanmayan GERİ damga (referans korundu) — rawrec56
+	actGeriSon   int64         // son uygulanmayan geri damganın kayması (örnek)
+	actGeriTaban int           // kalıcı geri adım: art arda uyumlu geri damgayla referans yeniden tabanlandı
+	actGeriAtlan int           // tek paketlik geri damga: uygulanmadı, referans korundu (yan JSON act_geri_atlanan)
+	actGeciciDuz int           // geçici act bölümünün tabanı sonraki damgayla düzeltildi/geri alındı
 }
 
 // actEsik — damgayla ölçülen fark bunu aşarsa bölüm açılır (ya da geçici
@@ -213,6 +220,42 @@ const actRedTaban = 5
 // pakete taşınır (`act_supheli`). Meşru geri düzeltmeler (bayat ilk paket
 // ≤ 500 ms, titreme) bunun çok altında.
 const actGeriEsik = 10 * time.Second
+
+// ── rawrec56: TEK PAKETLİK DAMGA TİTREMESİ (kayıt 940, Android) ──────────────
+// Android libwebrtc (WebRtcAudioRecord) her 10 ms okumada `AudioRecord.
+// getTimestamp().nanoTime`'ı okunan tampona göre düzeltmeden damga yapar;
+// AudioFlinger veriyi damgadan önce yayımladığı için okuma bazen bir HAL
+// periyodu BAYAT damga alır (tek paket ~18-20 ms ERKEN: "çukur"), okuma iş
+// parçacığı gecikince de ilk paket yeni damgayı alır (tek paket +20 ms: "tepe").
+// Sonraki paket hep eski çizgiye döner; gönderici (AbsoluteCaptureTimeSender,
+// enterpolasyon hatası > 1 ms) sapan paketi de dönüşü de damgalı yollar.
+// Kullanıcı eylemiyle ilgisi yok; bütün Android cihazlarda olur (940'ta 86 sn'de
+// 41 çukur + 5 tepe). Eski kod çukurdaki paketi referans yapıp dönüşü "durmuş
+// saat" sayıyor, her çukur için 18 ms kalıcı boşluk ekliyordu (57 bölüm,
+// −0,57 sn, oz "zaman-tutarsiz" → SFU kopyası elenip tarayıcı yedeği seçildi).
+// Fiziksel gerekçe: gerçek yakalama çizgisi basamak ATLAYABİLİR (duraklama,
+// xrun) ama asla inip geri dönemez; o yüzden geri damga kalıcı olmadıkça yok
+// sayılır, küçük ileri adım ise bir sonraki damga onaylayana kadar geçicidir.
+// Testler: audio_geri_damga_test.go (gerçek 940 dizisi dahil).
+
+// actGeriArdTaban — referansa göre GERİ (negatif, eşik üstü) damga UYGULANMAZ ve
+// referans korunur; bir sonraki paket eski çizgide → kayma 0. Art arda bu kadar
+// damga aynı geri kaymayı (±actGeriUyum) gösterirse kalıcı geri adımdır
+// (yayıncı saati geri sıçradı): referans o pakete taşınır (`act_geri_taban`).
+const actGeriArdTaban = 3
+const actGeriUyum = 3 * time.Millisecond
+
+// actGeciciUst — damgayla açılan bölümün adımı bundan küçükse bölüm GEÇİCİDİR:
+// bir sonraki damgalı paket adımı doğrular (kayma ≈ 0), düzeltir (küçük
+// kayma: taban kaydırılır, kuyruk onunla kayar) ya da geri alır (tek paketlik
+// tepe: kayma ≈ −adım → bölüm eski çizgiye çekilir, boşluk ~0). Daha büyük
+// adımlar (gerçek duraklama) eskisi gibi hemen kesindir. Bölüm `Kesin: true`
+// kalır: SR dokunamaz; yalnız yakalama damgası düzeltir.
+const actGeciciUst = 250 * time.Millisecond
+
+// actGeciciDuzUst — geçici bölümde en çok bu kadar düzeltme (merdiven: okuma iş
+// parçacığı takılınca +100 sonra −20×5; sonsuz salınım kilidi).
+const actGeciciDuzUst = 8
 
 // actRedOrnek — reddedilen bir damganın kaydı: paketin RTP'ye göre yeri, ham
 // damga, damganın duvar saatini ne kadar aştığı ve RTP'ye göre iddia ettiği
@@ -344,6 +387,50 @@ func (s *sesSaat) yerlestir(rtp uint32, gelis time.Time, seq uint16, yedek bool,
 		}
 	}
 	if actVar {
+		refKoru := false
+		if b.actGecici && s.sonYakBolum == b.Sira && !b.yazildi && b.Sira > 0 {
+			// GEÇİCİ ACT BÖLÜMÜ (rawrec56): sonraki damgalar hükmü verir. kayma ≈ 0
+			// → doğrulandı; küçük kayma → taban düzeltilir, bölüm geçici kalır
+			// (merdiven); büyük kayma → olduğu gibi kabul (gerçek duraklama). En
+			// çok actGeciciDuzUst düzeltme. Bölümden paket yazıldıysa (yazildi)
+			// taban artık kaydırılamaz: düzeltme atlanır, eski davranış.
+			if kayma >= -s.sureOrnek(actEsik) && kayma <= s.sureOrnek(actEsik) || b.actDuz >= actGeciciDuzUst || kayma < -s.sureOrnek(actGeciciUst) || kayma > s.sureOrnek(actGeciciUst) {
+				b.actGecici = false
+			}
+			// Düzeltme bölümün adımını EKSİYE çeviremez (bölüm önceki çizginin
+			// altına inemez). Tepe geri alınıp adım ~0 olduktan sonra geçici
+			// pencerede gelen tek paketlik çukur düzeltme DEĞİL geri damgadır:
+			// aşağıdaki kurala düşer (uygulanmaz, referans korunur). Damgasız
+			// paket bölümü kesinleştiremez: iki paketlik tepede ikinci paket
+			// damgasız gelir (gönderici ilkine göre sapma görmez), dönüş üçüncüde.
+			cukur := b.actGecici && kayma < 0 && b.SrEksikSn != nil && *b.SrEksikSn+s.ornekSn(kayma) < -s.ornekSn(s.sureOrnek(actEsik))/2
+			if b.actGecici && kayma != 0 && !cukur {
+				b.actDuz++
+				if alt := s.bolumler[b.Sira-1].sonPts + 1; b.Pts0+kayma < alt {
+					kayma = alt - b.Pts0
+				}
+				if kayma != 0 {
+					b.Pts0 += kayma
+					b.sonPts += kayma
+					s.sonPts += kayma
+					s.enSonPts += kayma
+					s.sonYakPts += kayma
+					kaymaBolum = b
+					e := *b.SrEksikSn + s.ornekSn(kayma)
+					b.SrEksikSn = &e
+					s.actGeciciDuz++
+				}
+				pts = dogru
+				s.actGeriArd = 0
+				p, y := s.bitir(b, rtp, gelis, seq, pts, dRtp, nil)
+				s.hicKaydet(eksik, p, rtp, gelis, nil)
+				s.sonYak, s.sonYakRTP, s.sonYakPts, s.sonYakBolum = yakNs, rtp, p, b.Sira
+				s.sonYakGelis = gelis
+				s.actRedArd = 0
+				s.actG.ekle(p, yakNs)
+				return p, y, kaymaBolum, kayma
+			}
+		}
 		switch {
 		case !b.Kesin && b.Sira > 0 && s.sonYakBolum < b.Sira:
 			// GEÇİCİ BÖLÜMÜ KESİNLEŞTİR (SR gibi, yayıncının damgasıyla):
@@ -379,19 +466,45 @@ func (s *sesSaat) yerlestir(rtp uint32, gelis time.Time, seq uint16, yedek bool,
 			yeni = &sesBolum{Sira: len(s.bolumler), RTP0: rtp, Pts0: pts, Kaynak: "act",
 				VarisEksikSn: eksik.Seconds(), SrEksikSn: &e, Kesin: true,
 				MuteSinyali: s.muteBekliyor, IlkGelisNs: gelis.UnixNano()}
+			yeni.actGecici = kayma <= s.sureOrnek(actGeciciUst)
 			s.bolumler = append(s.bolumler, yeni)
 			s.muteBekliyor = false
 			b = yeni
+			s.actGeriArd = 0
 		case kayma < -s.sureOrnek(actEsik) && !b.Kesin && b.Paket <= 3 && b.Sira > 0:
 			// Bayat ilk paket (referans aynı bölümde) — damgayla kesin.
 			b.Pts0 += kayma
 			pts = dogru
 			s.bayat++
+		case kayma < -s.sureOrnek(actEsik):
+			// GERİ DAMGA (rawrec56, kayıt 940): damga referansın gerisinde, dosya
+			// geri alınamaz. Tek paketlikse (Android bayat HAL damgası: "çukur")
+			// uygulanmaz ve REFERANS KORUNUR: bir sonraki paket eski çizgide → kayma 0.
+			// Eski kod referansı buraya taşıyordu; sonraki paket +18 ms "durmuş saat"
+			// sayılıp kalıcı boşluk oluyordu. Art arda actGeriArdTaban damga aynı
+			// geri kaymayı gösterirse kalıcı adımdır: referans taşınır.
+			if s.actGeriArd > 0 && kayma-s.actGeriSon <= s.sureOrnek(actGeriUyum) && s.actGeriSon-kayma <= s.sureOrnek(actGeriUyum) {
+				s.actGeriArd++
+			} else {
+				s.actGeriArd = 1
+			}
+			s.actGeriSon = kayma
+			if s.actGeriArd >= actGeriArdTaban {
+				s.actGeriTaban++
+				s.actGeriArd = 0
+			} else {
+				refKoru = true
+				s.actGeriAtlan++
+			}
+		default:
+			s.actGeriArd = 0
 		}
 		p, y := s.bitir(b, rtp, gelis, seq, pts, dRtp, yeni)
 		s.hicKaydet(eksik, p, rtp, gelis, yeni)
-		s.sonYak, s.sonYakRTP, s.sonYakPts, s.sonYakBolum = yakNs, rtp, p, b.Sira
-		s.sonYakGelis = gelis
+		if !refKoru {
+			s.sonYak, s.sonYakRTP, s.sonYakPts, s.sonYakBolum = yakNs, rtp, p, b.Sira
+			s.sonYakGelis = gelis
+		}
 		s.actRedArd = 0
 		s.actG.ekle(p, yakNs)
 		return p, y, kaymaBolum, kayma
@@ -735,6 +848,9 @@ func (s *sesSaat) ozDenetim() map[string]any {
 		"act_yeniden_taban": s.actYeniTaban,
 		"sr_adim":           s.srAdim,
 		"act_paket":         s.actPaket,
+		"act_geri_atlanan":  s.actGeriAtlan,
+		"act_geri_taban":    s.actGeriTaban,
+		"act_gecici_duzelt": s.actGeciciDuz,
 	}
 	if s.paketSayisi > 0 {
 		r["act_oran"] = yuvarla(float64(s.actPaket) / float64(s.paketSayisi))

@@ -1457,6 +1457,59 @@ yeniden üretildi (doğal yarış 8/8, RTP alıcı 3/5, gerçek mikrofon 1/3).
   bölüm sınırları arası parçaların kendi ortancasına göre.
 İmaj `v1.11.0-rawrec55` (rawrec54 yayına alınmadı).
 
+## 43. rawrec56 — TEK PAKETLİK YAKALAMA DAMGASI TİTREMESİ (2026-09-27, kayıt 940, Android)
+Galaxy Tab S10 Lite (Android 16, uygulama 1.6.36) ile sürülen 86 sn'lik testte SFU
+ses dosyası 57 bölüme bölündü, öz denetim −0,57 sn ile "zaman-tutarsiz" verdi, SFU
+kopyası elendi. Bağımsız denetim + veri: damga çizgisi kalıcı kaymıyor, TEK PAKET
+bir HAL periyodu erken damgalanıyor (41 "çukur", −18…−20 ms) ya da tek paket geç
+(5 "tepe", +20 ms); sonraki paket hep eski çizgiye dönüyor. Kaynak: Android
+libwebrtc `WebRtcAudioRecord` her 10 ms okumada `AudioRecord.getTimestamp().nanoTime`'ı
+okunan tampona göre (framePosition) düzeltmeden damga yapıyor (webrtc-sdk
+144.7559.05 AAR bayt kodunda doğrulandı); AudioFlinger veriyi damgadan ÖNCE
+yayımladığı için okuma bazen bayat çifti görüyor (çukur), okuma iş parçacığı
+gecikince ilk paket yeni damgayı alıyor (tepe). TimestampAligner'ın +1 ms en küçük
+aralık kelepçesi 20 − k ms'yi (18/19) açıklıyor; ACM ilk 10 ms çerçevenin damgasını
+pakete yapıştırıyor; gönderici (AbsoluteCaptureTimeSender, enterpolasyon hatası > 1 ms)
+sapan paketi de dönüşü de damgalı yolluyor. Kullanıcı eylemiyle ilgisi yok (ilk çukur
+ilk mikrofon dokunuşundan 41 sn önce). iOS rawrec51 (§39) AYNI KÖK DEĞİL (o kalıcı
++20, örnek sayacı tarafı). Yazıcı hatası: `yerlestir` geri (negatif, eşik üstü)
+damgayı dosyaya uygulamıyor ama REFERANSI o pakete taşıyordu; sonraki normal paket
+referansa göre +18 → "durmuş saat, damgayla kesin" → her çukur için kalıcı 18 ms
+boşluk (41 × 18 ms = 0,75 sn; −0,57'nin kalanı susturma içinde ekstrapole edilmiş SR).
+- GERİ DAMGA kuralı: `kayma < −actEsik` ise damga uygulanmaz ve referans KORUNUR
+  (`act_geri_atlanan`); sonraki paket eski çizgide → kayma 0. Art arda
+  `actGeriArdTaban` (3) damga aynı geri kaymayı (±3 ms) gösterirse kalıcı geri
+  adımdır (yayıncı saati geri sıçradı): referans taşınır (`act_geri_taban`).
+  Fiziksel gerekçe: gerçek yakalama çizgisi basamak atlayabilir ama inip geri dönemez.
+- GEÇİCİ ACT BÖLÜMÜ: damgayla açılan bölümün adımı ≤ `actGeciciUst` (250 ms) ise
+  bölüm geçicidir (`Kesin` yine true, SR dokunamaz): bir sonraki damga adımı
+  doğrular (|kayma| ≤ 10 ms), düzeltir (küçük kayma: taban kaydırılır, kuyruktaki
+  paketler onunla kayar — SR kesinleştirmesiyle aynı `kaymaBolum` yolu; merdiven:
+  okuma iş parçacığı takılınca +100 sonra −20×5, en çok 8 düzeltme) ya da geri alır
+  (tek paketlik tepe: kayma ≈ −adım → boşluk ~0; `act_gecici_duzelt`). Düzeltme
+  bölümün adımını eksiye çeviremez: tepe geri alındıktan sonra geçici pencerede
+  gelen çukur düzeltme değil geri damgadır. Bölümden paket yazıldıysa (`yazildi`,
+  yazma gecikmesi 25 sn) taban kaydırılmaz — eski davranış. Geri alınan bölümler
+  listede ~0 boşlukla kalır; postprocess `_senkron_olc` bunların sınırını dışlamaz
+  (`_SENKRON_SINIR_ONEMSIZ_SN`).
+- `actEsik`'i 25 ms'ye çıkarmak REDDEDİLDİ: gerçek bir çerçevelik adımları (iOS 927,
+  10–25 ms xrun) da yutar, rawrec51'i geri alır.
+- Testler `audio_geri_damga_test.go` (gönderici modeli `actGonderici`): yerlestir
+  izi (t, t+2, t+40), sentetik 940 (60 sn, 40 çukur + 6 tepe + alternans + 2 susturma:
+  eski 51 bölüm/+0,876 sn/tutarsız → 9 bölüm/0,000/tutarlı), kalıcı +20 adım korunur,
+  çukur + gelecek damga (937), çukurlar + titrek SR, adım sonra susturma, susturma
+  sonrası ilk damga çukur (tek paket 18 ms), tepe sonra susturma, kalıcı geri adım
+  (3 damgada yeniden taban), çift tepe/çukur, Chrome seyrek damga, merdiven + gerçek
+  80 ms xrun, yazıldıktan sonra düzeltme yok, geçici bölümde SR, GERÇEK 940 dizisi
+  (`kayit940_verisi_test.go`: damgalar ve SR'lar gerçek, RTP bölüm tablosundan;
+  eski 57 bölüm → 11 gerçek duraklama + 6 geri alınmış ~0 bölüm, oz "tutarlı").
+  Altın değerler değişmedi (69 test). Bilinen artıklar: susturma sonrası ilk paket
+  çukursa / tepe hemen ardından susturma gelirse o tek paket 18–20 ms yanlış yerde
+  (toplam doğru, 2 bölüm); geçici pencerede gerçek adım üstüne gelen çukur bir
+  paketi 18 ms erken yerleştirir (granül artışı 2 ms), toplam doğru.
+İmaj `v1.11.0-rawrec56`. Kaynak düzeltmesi (uygulama kancasında damgayı
+framePosition ile düzeltme) ayrıca mobil uygulamada.
+
 ## Rebuild
 ```bash
 cd livekit-server-source            # bu repo, branch speaknow-vp9-simulcast
