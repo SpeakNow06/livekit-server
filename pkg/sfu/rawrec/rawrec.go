@@ -658,10 +658,10 @@ func (w *Writer) loop() {
 		if kayma == 0 {
 			return
 		}
-		if b.Kaynak == "sr-adim" {
-			// RAPOR BASAMAĞI (rawrec52): bölüm ORTADAN bölündü — bölme
-			// noktasından (eski koordinatta Pts0−kayma) sonraki kuyruk
-			// öğeleri kayar ve yeni bölüme geçer.
+		if b.Kaynak == "sr-adim" || b.Kaynak == "sr-hakem" {
+			// RAPOR BASAMAĞI (rawrec52) / SR HAKEM (rawrec57): bölüm ORTADAN
+			// bölündü — bölme noktasından (eski koordinatta Pts0−kayma)
+			// sonraki kuyruk öğeleri kayar ve yeni bölüme geçer.
 			bolP := b.Pts0 - kayma
 			n := 0
 			for i := range kuyruk {
@@ -671,8 +671,8 @@ func (w *Writer) loop() {
 					n++
 				}
 			}
-			w.log.Infow("rawrec ses: rapor basamağı — bölüm bölündü",
-				"track", w.trackID, "sid", w.sid, "bolum", b.Sira,
+			w.log.Infow("rawrec ses: rapor basamağı / SR hakem — bölüm bölündü",
+				"track", w.trackID, "sid", w.sid, "bolum", b.Sira, "kaynak", b.Kaynak,
 				"adim_ms", yuvarla(saat.ornekSn(kayma)*1000), "kaydirilan_paket", n,
 				"bolme_sn", yuvarla(saat.ornekSn(bolP)))
 			return

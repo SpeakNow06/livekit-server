@@ -176,7 +176,37 @@ type sesSaat struct {
 	actGeriTaban int           // kalıcı geri adım: art arda uyumlu geri damgayla referans yeniden tabanlandı
 	actGeriAtlan int           // tek paketlik geri damga: uygulanmadı, referans korundu (yan JSON act_geri_atlanan)
 	actGeciciDuz int           // geçici act bölümünün tabanı sonraki damgayla düzeltildi/geri alındı
+
+	// ── SR HAKEM (rawrec57; kayıt 981/982, 2026-10-07) ────────────────────
+	// Damgalı akışta SR'ın gördüğü DOSYA DÜZEYİ sapma: SR'ın yayıncı saatiyle
+	// beyan ettiği pts − mevcut eşlemenin pts'i. Doğru dosyada ≈ 0 (± kristal
+	// kayması, SR aralığında < 1 ms). Basamak = yazılmayan ya da fazladan
+	// yazılan boşluk; iki SR'lık gruplar karşılaştırılır (bkz. srHakem).
+	hakemSapma  []int64    // son SR'ların sapması (örnek)
+	hakemPts    []int64    // o SR'ların pts'i
+	hakemHic    []hicKaydi // her SR aralığının en büyük hıçkırığı (hizalı)
+	hakemRed    []hicKaydi // her SR aralığında İLK reddedilen gelecek damga (pts 0 = yok)
+	hakemHicSu  hicKaydi
+	hakemRedSu  hicKaydi
+	srHakemSayi int // hakemin yazdığı/küçülttüğü boşluk sayısı
+	srHakemBos  int // basamak görüldü ama uygulanamadı (bölüm yazılmış / küçültülecek boşluk yok)
 }
+
+// ── SR HAKEM sabitleri (rawrec57) ──────────────────────────────────────────
+// hakemEsikSn — iki SR grubunun ortalaması bundan fazla ayrışırsa dosyada
+// yazılmamış (pozitif) ya da fazladan yazılmış (negatif) boşluk vardır. Öz
+// denetimin "zaman-tutarsiz" eşiğiyle aynı: altı damga/varış yolunun (10 ms
+// çözünürlük) işi, üstü dosyayı eletir. Kristal kayması basamak yapmaz
+// (100 ppm × 5 sn = 0,5 ms), ardışık gruplar karşılaştırıldığı için birikmez.
+// hakemUyum — grubun iç tutarlılığı (Chrome/Android SR salınımı ±15 ms);
+// tek bozuk SR (crbug 168328) grubu bozar, basamak sayılmaz.
+// hakemGrup — 2 SR (~10 sn) + pencere (≤ 5 sn) < yazma gecikmesi (25 sn):
+// bölme noktası henüz yazılmamış.
+const (
+	hakemEsikSn = 0.5
+	hakemUyum   = 50 * time.Millisecond
+	hakemGrup   = 2
+)
 
 // actEsik — damgayla ölçülen fark bunu aşarsa bölüm açılır (ya da geçici
 // bölüm kesinleşir). Damgada ağ titremesi yok; ölçülen gürültü ±1 ms (Chrome
@@ -364,6 +394,10 @@ func (s *sesSaat) yerlestir(rtp uint32, gelis time.Time, seq uint16, yedek bool,
 			s.actGelecek++
 			s.actRedArd++
 			s.actRedKaydet(pts, yakNs, gelecek, kayma)
+			if s.hakemRedSu.pts == 0 {
+				// SR hakemi için: damga olayın yerini tam gördü, bölme adayı.
+				s.hakemRedSu = hicKaydi{pts: pts, rtp: rtp, gelisNs: gelis.UnixNano()}
+			}
 			if s.actRedArd >= actRedTaban {
 				yeniTaban = true
 			}
@@ -416,6 +450,7 @@ func (s *sesSaat) yerlestir(rtp uint32, gelis time.Time, seq uint16, yedek bool,
 					s.enSonPts += kayma
 					s.sonYakPts += kayma
 					kaymaBolum = b
+					s.hakemKaydir(b.Pts0-kayma, kayma)
 					e := *b.SrEksikSn + s.ornekSn(kayma)
 					b.SrEksikSn = &e
 					s.actGeciciDuz++
@@ -450,6 +485,7 @@ func (s *sesSaat) yerlestir(rtp uint32, gelis time.Time, seq uint16, yedek bool,
 				s.sonPts += kayma
 				s.enSonPts += kayma
 				kaymaBolum = b
+				s.hakemKaydir(b.Pts0-kayma, kayma)
 			}
 			pts = dogru
 			b.Kesin = true
@@ -593,6 +629,9 @@ type hicKaydi struct {
 // açılınca basamak izleme sıfırlanır (bölüm başı zaten bir sıçrama, sapmalar
 // yeni tabana göre ölçülür).
 func (s *sesSaat) hicKaydet(eksik time.Duration, pts int64, rtp uint32, gelis time.Time, yeni *sesBolum) {
+	if s.hakemHicSu.pts == 0 || eksik > s.hakemHicSu.eksik {
+		s.hakemHicSu = hicKaydi{eksik: eksik, pts: pts, rtp: rtp, gelisNs: gelis.UnixNano()}
+	}
 	if yeni != nil {
 		s.srSapma, s.hicAra, s.hicSu = s.srSapma[:0], s.hicAra[:0], hicKaydi{}
 		return
@@ -824,11 +863,189 @@ func (s *sesSaat) srGeldi(sr *livekit.RTCPSenderReportState) (*sesBolum, int64) 
 			b = yeni // yazıcı: pts ≥ Pts0−kayma olan kuyruk öğeleri kayar (srIsle)
 		}
 	}
+	if kayma != 0 {
+		s.hakemKaydir(b.Pts0-kayma, kayma) // eşleme değişti: örnekler yeni koordinata
+	} else if s.actPaket > 0 && s.anchorKesin {
+		if hb, hk := s.srHakem(kaynak, temel, ptsSR); hk != 0 {
+			b, kayma = hb, hk
+		}
+	}
 	if len(s.gunluk) < srGunluguUstSinir {
 		s.gunluk = append(s.gunluk, srOrnek{Katman: 0, RTP: sr.RtpTimestamp, AtNs: temel,
 			NtpNs: ntpNs(sr.NtpTimestamp), Pts: &ptsSR})
 	}
 	return b, kayma
+}
+
+func (s *sesSaat) hakemSifirla() {
+	s.hakemSapma, s.hakemPts = s.hakemSapma[:0], s.hakemPts[:0]
+	s.hakemHic, s.hakemRed = s.hakemHic[:0], s.hakemRed[:0]
+	s.hakemHicSu, s.hakemRedSu = hicKaydi{}, hicKaydi{}
+}
+
+// hakemKaydir — eşleme `eskiPts`'ten itibaren `kayma` kadar değişti (bölüm
+// tabanı kesinleşti, bölündü, küçüldü): o noktadan sonraki SR örnekleri yeni
+// koordinata taşınır (pts += kayma, sapma −= kayma). Sıfırlamak yerine
+// taşımak şart: 982'de bayat damganın kesinleştirdiği bölümden sonraki SR'lar
+// "önce" grubunu kaybedince basamak hiç görülmüyordu.
+func (s *sesSaat) hakemKaydir(eskiPts, kayma int64) {
+	for i := range s.hakemPts {
+		if s.hakemPts[i] >= eskiPts {
+			s.hakemPts[i] += kayma
+			s.hakemSapma[i] -= kayma
+		}
+	}
+	for i := range s.hakemHic {
+		if s.hakemHic[i].pts >= eskiPts {
+			s.hakemHic[i].pts += kayma
+		}
+		if s.hakemRed[i].pts >= eskiPts {
+			s.hakemRed[i].pts += kayma
+		}
+	}
+	if s.hakemHicSu.pts >= eskiPts {
+		s.hakemHicSu.pts += kayma
+	}
+	if s.hakemRedSu.pts >= eskiPts {
+		s.hakemRedSu.pts += kayma
+	}
+}
+
+// srHakem — SR HAKEM (rawrec57; kayıt 981/982, 2026-10-07).
+//
+// NEDEN: damgalı akışta her bölüm kararı tek bir tanığa dayanıyordu ve kesin
+// sayılınca SR'a kapanıyordu. 981 (Android uygulama): HAL damgası sıçradı,
+// "gelecek damga" kuralı (olay 937) reddedip yeniden tabanladı, gönderme
+// duruşu 2 sn eşiğinin altında kaldı → üç gerçek 1,83 sn'lik boşluk hiç
+// yazılmadı, SR her birini 5 sn içinde gösterdi ama dinleyen yoktu (rapor
+// basamağı yolu damgalı akışta kapalı). 982: ağ kesintisi + patlama, varış
+// bölümünü bayat damga +3,16 sn "kesinleştirdi", SR 5 sn sonra −3,2 dedi,
+// `!b.Kesin` şartına takıldı. İkisinde de öz denetim (aynı SR'larla) dosyayı
+// eledi ve tarayıcı yedeğine düşüldü.
+//
+// KURAL: SR, yayıncının beyan ettiği zaman çizgisidir (RFC 3550 senkron);
+// öz denetim ve tarayıcı kopyası da buna göre. Son iki SR'ın dosya düzeyi
+// sapması, önceki iki SR'ınkinden hakemEsikSn'den fazla ayrılır ve gruplar
+// kendi içinde hakemUyum içinde tutarlıysa:
+//
+//	adım > 0 (yazılmamış boşluk): pencerede reddedilen ilk damganın yerine,
+//	  yoksa en büyük hıçkırığa, yoksa pencere sonuna "sr-hakem" bölümü açılır
+//	  (sr-adim gibi ortadan bölme; yazıcı kuyruğu kaydırır).
+//	adım < 0 (fazla boşluk): pencerede açılmış son bölümün boşluğu küçültülür
+//	  (kesin olsa da; boşluk sıfırın altına inmez, yazılmış bölüme dokunulmaz).
+//
+// Yazma gecikmesi (25 sn) iki SR + pencereyi kapsar. Testler:
+// audio_sr_hakem_test.go (981, 982, sessizlik).
+func (s *sesSaat) srHakem(kaynakNs, temelNs, ptsSR int64) (*sesBolum, int64) {
+	gercek := (kaynakNs - s.anchorKaynakNs) * s.hz / int64(time.Second)
+	s.hakemSapma = append(s.hakemSapma, gercek-ptsSR)
+	s.hakemPts = append(s.hakemPts, ptsSR)
+	s.hakemHic = append(s.hakemHic, s.hakemHicSu)
+	s.hakemRed = append(s.hakemRed, s.hakemRedSu)
+	s.hakemHicSu, s.hakemRedSu = hicKaydi{}, hicKaydi{}
+	if len(s.hakemSapma) > 2*hakemGrup {
+		s.hakemSapma, s.hakemPts = s.hakemSapma[1:], s.hakemPts[1:]
+		s.hakemHic, s.hakemRed = s.hakemHic[1:], s.hakemRed[1:]
+	}
+	n := len(s.hakemSapma)
+	if n < 2*hakemGrup {
+		return nil, 0
+	}
+	sonra, once := s.hakemSapma[n-hakemGrup:], s.hakemSapma[:n-hakemGrup]
+	uyum := s.sureOrnek(hakemUyum)
+	if yayilim(sonra) > uyum || yayilim(once) > uyum {
+		return nil, 0
+	}
+	adim := ortalama(sonra) - ortalama(once)
+	if a := s.ornekSn(adim); a < hakemEsikSn && a > -hakemEsikSn {
+		return nil, 0
+	}
+	pencereBas, pencereSon := s.hakemPts[n-hakemGrup-1], s.hakemPts[n-hakemGrup]
+	if adim < 0 {
+		// FAZLA BOŞLUK: pencerede açılmış son bölümün boşluğunu küçült.
+		var hedef *sesBolum
+		for i := len(s.bolumler) - 1; i > 0; i-- {
+			bb := s.bolumler[i]
+			if bb.Pts0 < pencereBas {
+				break
+			}
+			if bb.Pts0 <= pencereSon {
+				hedef = bb
+				break
+			}
+		}
+		if hedef == nil || hedef.yazildi {
+			s.srHakemBos++
+			s.hakemSifirla()
+			return nil, 0
+		}
+		kayma := adim
+		if alt := s.bolumler[hedef.Sira-1].sonPts + 1; hedef.Pts0+kayma < alt {
+			kayma = alt - hedef.Pts0
+		}
+		if kayma == 0 {
+			s.srHakemBos++
+			s.hakemSifirla()
+			return nil, 0
+		}
+		eski := hedef.Pts0
+		for i := hedef.Sira; i < len(s.bolumler); i++ {
+			s.bolumler[i].Pts0 += kayma
+			s.bolumler[i].sonPts += kayma
+		}
+		s.sonPts += kayma
+		s.enSonPts += kayma
+		if s.sonYakPts >= eski {
+			s.sonYakPts += kayma
+		}
+		e := s.ornekSn(kayma)
+		if hedef.SrEksikSn != nil {
+			e += *hedef.SrEksikSn
+		} else {
+			e += hedef.VarisEksikSn
+		}
+		hedef.SrEksikSn = &e
+		hedef.Kesin = true
+		hedef.Kaynak += "+hakem"
+		s.srHakemSayi++
+		s.hakemKaydir(eski, kayma)
+		return hedef, kayma
+	}
+	// EKSİK BOŞLUK: bölme noktası. Önce pencerenin en büyük hıçkırığı: SR
+	// gönderme saatine göre basamak orada (981: HAL damgası birikim kadar
+	// ÖNCE sıçrar, akıştaki gerçek boşluk birikim tükenince gelir; damga
+	// reddedildiği için akış henüz durmamış demektir). Hıçkırık yoksa
+	// (boşluk DTX içinde kaldıysa) reddedilen ilk damganın yeri, o da yoksa
+	// pencere sonu.
+	hic, red := s.hakemHic[n-hakemGrup], s.hakemRed[n-hakemGrup]
+	simdiki := s.simdiki()
+	bolP, bolRTP, bolGelis := pencereSon, simdiki.RTP0+uint32(pencereSon-simdiki.Pts0), temelNs
+	switch {
+	case hic.eksik >= hicEsik:
+		bolP, bolRTP, bolGelis = hic.pts, hic.rtp, hic.gelisNs
+	case red.pts > 0:
+		bolP, bolRTP, bolGelis = red.pts, red.rtp, red.gelisNs
+	}
+	if bolP < simdiki.Pts0 {
+		// Aday önceki bölümde (arada bölüm açılmış): sıra bozulmasın, bu
+		// bölümün başından böl (yer en çok bir SR aralığı şaşar, süre doğru).
+		bolP, bolRTP, bolGelis = simdiki.Pts0, simdiki.RTP0, simdiki.IlkGelisNs
+	}
+	e := s.ornekSn(adim)
+	yeni := &sesBolum{Sira: len(s.bolumler), RTP0: bolRTP, Pts0: bolP + adim,
+		Kaynak: "sr-hakem", SrEksikSn: &e, Kesin: true, IlkGelisNs: bolGelis,
+		sonRTP: s.sonRTP, sonPts: s.sonPts + adim, sonGelisNs: s.sonGelis.UnixNano()}
+	simdiki.sonGelisNs = bolGelis // eski bölümün penceresi bölmede biter
+	s.bolumler = append(s.bolumler, yeni)
+	s.sonPts += adim
+	s.enSonPts += adim
+	if s.sonYakPts >= bolP {
+		s.sonYakPts += adim
+		s.sonYakBolum = yeni.Sira
+	}
+	s.srHakemSayi++
+	s.hakemKaydir(bolP, adim)
+	return yeni, adim // yazıcı: pts ≥ Pts0−kayma olan kuyruk öğeleri kayar (srIsle)
 }
 
 // ozDenetim — yazıcının kendi karnesi: SR'ların söylediği duvar süresi ile
@@ -851,6 +1068,8 @@ func (s *sesSaat) ozDenetim() map[string]any {
 		"act_geri_atlanan":  s.actGeriAtlan,
 		"act_geri_taban":    s.actGeriTaban,
 		"act_gecici_duzelt": s.actGeciciDuz,
+		"sr_hakem":          s.srHakemSayi, // SR hakeminin yazdığı/küçülttüğü boşluk (rawrec57)
+		"sr_hakem_bos":      s.srHakemBos,  // basamak görüldü, uygulanamadı
 	}
 	if s.paketSayisi > 0 {
 		r["act_oran"] = yuvarla(float64(s.actPaket) / float64(s.paketSayisi))
