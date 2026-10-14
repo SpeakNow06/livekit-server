@@ -219,6 +219,13 @@ func hakemDogrula(t *testing.T, ad string, o geriOzet, pk []oggPaket, dogru []in
 	if a, _ := o.oz["acik_sn"].(float64); math.Abs(a) > 0.1 {
 		t.Fatalf("%s: SR açığı %.3f sn > 0,1", ad, a)
 	}
+	// Gözlem alanı (rawrec57): yayıncı NTP'sine göre açık da yazılmalı ve
+	// varış tabanlı ölçüyle uyuşmalı (bu modelde SR gecikmesi sabit 30 ms).
+	n, var_ := o.oz["acik_ntp_sn"].(float64)
+	a, _ := o.oz["acik_sn"].(float64)
+	if !var_ || math.Abs(n-a) > 0.1 {
+		t.Fatalf("%s: acik_ntp_sn %v (var=%v), acik_sn %.3f ile uyuşmuyor", ad, n, var_, a)
+	}
 	if math.Abs(o.eklenen-eklenen) > tolEklenen {
 		t.Fatalf("%s: eklenen %.3f sn, %.3f ± %.2f bekleniyordu: %v", ad, o.eklenen, eklenen, tolEklenen, o.bl)
 	}

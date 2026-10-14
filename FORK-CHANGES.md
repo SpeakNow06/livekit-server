@@ -1510,6 +1510,49 @@ boşluk (41 × 18 ms = 0,75 sn; −0,57'nin kalanı susturma içinde ekstrapole 
 İmaj `v1.11.0-rawrec56`. Kaynak düzeltmesi (uygulama kancasında damgayı
 framePosition ile düzeltme) ayrıca mobil uygulamada.
 
+## 44. rawrec57 — SR HAKEMİ: damgalı akışta yayıncı saati bölüm boşluklarını düzeltir (2026-10-14, kayıtlar 981/982, Android uygulama)
+7 Ekim 2026'nın üç gerçek dersinden ikisinde Android uygulamadaki öğrencinin mikrofon
+SFU dosyası öz denetimde elendi (981: SR duvar − yazılan +5,52 sn; 982: −3,12 sn),
+tarayıcı yedeğine düşüldü. Yan JSON + LiveKit günlüğü + tarayıcı kopyası birlikte:
+- 981: telefonun ses saati 7 kez ~1,83 sn durdu (tarayıcı kopyası da 8 durma / 13,8 sn
+  gördü → durmalar gerçek). Yazıcı ilk 4'ünü bölüm olarak yazdı; son 3'ünde HAL damgası
+  birikim kadar ÖNCE sıçradığı için gelecek-damga kuralı (§42, `actGelecekEsik` 500 ms,
+  `actRedTaban` 5) damgaları reddedip referansı yeniden tabanladı, gerçek boşluk (birikim
+  tükenince gelen hıçkırık) yazılmadı → dosya 5,5 sn kısa.
+- 982: 18:42:40'ta 3,5 sn ağ kesintisi ("quality hold - high loss"); varış boşluğu bölüm
+  oldu, kesinti sonrası patlamadaki BAYAT yakalama damgası bölümü +3,16 sn ile
+  kesinleştirdi; sonraki damgalar ve SR boşluğu yalanladı ama SR yalnız kesin OLMAYAN
+  bölümü düzeltebiliyordu → dosya 3,1 sn uzun.
+Ortak kök: yakalama damgası (ACT) ile SR aynı şeyi söylemiyor; yazıcı damgaya "kesin"
+güveniyor, SR'a yalnız kesin olmayan bölümde söz veriyor. Oysa SR yayıncının BEYAN
+ETTİĞİ zaman çizgisi (RFC 3550 NTP↔RTP; öz denetim de, tarayıcı kopyasıyla senkron
+ölçümü de bununla yapılıyor) — akışlar arası hizanın tek ortak referansı.
+Düzeltme (`saat.go srHakem/hakemKaydir`, `rawrec.go srIsle`): damgalı akışta (actPaket>0,
+çapa kesin) her SR'ın dosya düzeyi sapması `(yayıncı NTP − çapa)·hz − ptsSR` tutulur (son 4).
+Son 2'nin ortalaması önceki 2'den ≥ `hakemEsikSn` (0,5 sn) ayrışır ve iki grup kendi içinde
+≤ `hakemUyum` (50 ms) tutarlıysa: adım>0 (EKSİK boşluk) → pencerenin ([önce-son SR,
+sonra-ilk SR]) en büyük hıçkırığında (`hicEsik`) yeni "sr-hakem" bölümü (Kesin); hıçkırık
+yoksa reddedilen ilk damganın yeri, o da yoksa pencere sonu (geçerli bölümün başına
+kelepçeli). adım<0 (FAZLA boşluk) → pencerede açılmış son bölümün Pts0'ı küçültülür
+(önceki bölümün sonuna kelepçeli; dosyaya yazılmışsa dokunulmaz → `sr_hakem_bos`).
+Kesin bölüm DAHİL; 25 sn yazma gecikmesi pencereyi karşılıyor. Eşleme değişince (bölüm
+kesinleşmesi, SR düzeltmesi, hakem) örnekler sıfırlanmaz, `hakemKaydir` ile yeni koordinata
+kaydırılır (sıfırlamak 982'de "önce" grubunu yok ediyordu). Yan JSON `oz_denetim`:
+`sr_hakem`, `sr_hakem_bos`; gözlem alanı `acik_ntp_sn` (yayıncı NTP'sine göre açık, SR'ın
+varış gecikmesinden bağımsız — KARAR DEĞİŞTİRMEZ; kayıt 944'te (Windows/Edge, +1,70 sn,
+ham dosya silinmiş) ders sonu kayıpta son SR'ın geç gelmesi sahte tutarsızlık adayıydı,
+iki alan ayrışırsa sebep o).
+Kanıt (`audio_sr_hakem_test.go`, Android yayıncı modeli: SR = libwebrtc gönderme saati;
+ACT = düzeltilmemiş HAL damgası, okuma birikimi kadar ileride, periyodik ~0,5 sn):
+mevcut kod 981 dizisinde prod'la aynı sonucu üretir (bölüm 5, eklenen 7,33 sn,
+act_gelecek 15, yeniden taban 3, açık +5,80, zaman-tutarsiz), 982'de eklenen +3,16 /
+açık −3,16; hakemle 981 → bölüm 8, eklenen 12,832 (beyan 12,83), açık 0, sr_hakem 3;
+982 → eklenen 0, açık 0, sr_hakem 1; sessizlik + meşru durmalar + 937 tipi gelecek damga
+→ sr_hakem 0, tutarlı. Tüm takım (911/923/931/937/940 altınları) geçer.
+Sınır: yayıncı modeli sunucu verisinden çıkarıldı, telefon tarafı logcat ile
+doğrulanmadı; ilk gerçek Android dersinde `sr_hakem` ve `oz_denetim` izlenecek.
+İmaj `v1.11.0-rawrec57`.
+
 ## Rebuild
 ```bash
 cd livekit-server-source            # bu repo, branch speaknow-vp9-simulcast

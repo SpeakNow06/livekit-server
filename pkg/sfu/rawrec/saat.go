@@ -1094,6 +1094,13 @@ func (s *sesSaat) ozDenetim() map[string]any {
 	r["yazilan_sn"] = yuvarla(yazilan)
 	r["acik_sn"] = yuvarla(acik)
 	r["ham_acik_sn"] = yuvarla(duvar - ham)
+	if ilk.NtpNs != 0 && son.NtpNs != 0 {
+		// GÖZLEM (rawrec57): açık, yayıncının kendi saatine (SR NTP) göre —
+		// SR'ın varış gecikmesinden bağımsız. Karar DEĞİŞTİRMEZ (durum yine
+		// `acik_sn`den). Ders sonu kayıpta son SR geç gelirse `acik_sn` sahte
+		// tutarsızlık verebilir (kayıt 944 adayı); ikisi ayrışıyorsa sebep o.
+		r["acik_ntp_sn"] = yuvarla(float64(son.NtpNs-ilk.NtpNs)/1e9 - yazilan)
+	}
 	if acik > ozDenetimEsikSn || acik < -ozDenetimEsikSn {
 		r["durum"] = "zaman-tutarsiz"
 		r["neden"] = fmt.Sprintf("SR duvar %.1f sn, yazılan %.1f sn (fark %.2f sn)", duvar, yazilan, acik)
